@@ -1,0 +1,4 @@
+# System packages required for PDF conversion
+# This file is read by Heroku Apt buildpack to install dependencies during build
+libreoffice
+
