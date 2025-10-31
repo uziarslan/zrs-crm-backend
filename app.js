@@ -87,14 +87,6 @@ app.use('/api/v1/export', exportRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/integrations', integrationRoutes);
 
-// Swagger documentation
-if (process.env.NODE_ENV !== 'production') {
-    const swaggerUi = require('swagger-ui-express');
-    const YAML = require('yamljs');
-    const swaggerDocument = YAML.load('./docs/swagger.yaml');
-    app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
-}
-
 // 404 handler
 app.use((req, res) => {
     res.status(404).json({

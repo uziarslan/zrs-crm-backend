@@ -25,21 +25,21 @@ async function seed() {
         // logger.info('Cleared existing data');
 
         // Create super admin
-        const existingAdmin = await Admin.findOne({ email: 'admin@zrscarstrading.com' });
+        const existingAdmin = await Admin.findOne({ email: 'syedmaaz@zrscarstrading.com' });
 
         if (!existingAdmin) {
             const admin = await Admin.create({
-                name: 'Super Admin',
-                email: 'admin@zrscarstrading.com',
-                passwordHash: 'Admin@123', // Will be hashed by pre-save hook
+                name: 'Maaz Shah',
+                email: 'syedmaaz@zrscarstrading.com',
+                passwordHash: '1100Apple!', // Will be hashed by pre-save hook
                 role: 'admin',
                 isActive: true
             });
             logger.info(`✓ Admin created: ${admin.email}`);
-            logger.info('  Default password: Admin@123');
+            logger.info('  Default password: 1100Apple!');
             logger.info('  ⚠️  CHANGE THIS PASSWORD IMMEDIATELY IN PRODUCTION!');
         } else {
-            logger.info('✓ Admin already exists: admin@zrscarstrading.com');
+            logger.info('✓ Admin already exists: syedmaaz@zrscarstrading.com');
         }
 
         // Create additional admins for testing dual approval
@@ -50,7 +50,7 @@ async function seed() {
             await Admin.create({
                 name: 'Admin Two',
                 email: admin2Email,
-                passwordHash: 'Admin@123',
+                passwordHash: '1100Apple!',
                 role: 'admin',
                 isActive: true
             });
@@ -92,8 +92,8 @@ async function seed() {
 
         logger.info('\n✅ Seeding completed successfully!');
         logger.info('\n📝 Login Credentials:');
-        logger.info('   Admin: admin@zrscarstrading.com / Admin@123');
-        logger.info('   Admin2: admin2@zrscarstrading.com / Admin@123');
+        logger.info('   Admin: syedmaaz@zrscarstrading.com / 1100Apple!');
+        logger.info('   Admin2: admin2@zrscarstrading.com / 1100Apple!');
         logger.info('   Manager: manager@zrscarstrading.com (use OTP login)');
         logger.info('   Investor: chaudhryuzairarslan2000@gmail.com (use OTP login)');
         logger.info('\n⚠️  Remember to change default passwords in production!');
