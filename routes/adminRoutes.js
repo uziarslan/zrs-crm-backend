@@ -12,6 +12,9 @@ router.use(isAdmin);
 // Dashboard
 router.get('/dashboard', adminController.getDashboard);
 
+// Search leads
+router.get('/search/leads', adminController.searchLeads);
+
 // Manager management
 router.get('/managers', adminController.getManagers);
 

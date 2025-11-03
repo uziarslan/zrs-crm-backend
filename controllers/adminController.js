@@ -43,6 +43,22 @@ exports.getDashboard = async (req, res, next) => {
             'approvedBy.1': { $exists: false }
         });
 
+        // Pending dual approvals (leads that need approval from the other group)
+        // Count leads where approval.status is 'pending' and they don't have approvals from 2 different groups yet
+        const pendingDualApprovalLeads = await Lead.find({
+            'approval.status': 'pending'
+        });
+
+        let pendingDualApprovals = 0;
+        for (const lead of pendingDualApprovalLeads) {
+            if (lead.approval && lead.approval.approvals) {
+                const groupsCovered = new Set(lead.approval.approvals.map(a => a.groupName).filter(Boolean));
+                if (groupsCovered.size < 2) {
+                    pendingDualApprovals++;
+                }
+            }
+        }
+
         // Investor utilization
         const investors = await Investor.find({ status: 'active' });
         const totalCreditLimit = investors.reduce((sum, inv) => sum + inv.creditLimit, 0);
@@ -106,7 +122,8 @@ exports.getDashboard = async (req, res, next) => {
                 },
                 approvals: {
                     pendingPOApprovals,
-                    pendingSalesApprovals
+                    pendingSalesApprovals,
+                    pendingDualApprovals
                 },
                 investors: {
                     totalCreditLimit,
@@ -326,6 +343,109 @@ exports.getAuditLogs = async (req, res, next) => {
         });
     } catch (error) {
         logger.error('Get audit logs error:', error);
+        next(error);
+    }
+};
+
+/**
+ * @desc    Search leads (all statuses) for admin dashboard
+ * @route   GET /api/v1/admin/search/leads
+ * @access  Private (Admin only)
+ */
+exports.searchLeads = async (req, res, next) => {
+    try {
+        const { q } = req.query;
+
+        if (!q || q.trim().length < 2) {
+            return res.status(200).json({
+                success: true,
+                count: 0,
+                data: []
+            });
+        }
+
+        const searchQuery = q.trim();
+        const searchRegex = { $regex: searchQuery, $options: 'i' };
+
+        // Build search conditions - separate text and numeric fields
+        const searchConditions = [
+            // leadId (text field)
+            { leadId: searchRegex },
+            // contactInfo (text fields)
+            { 'contactInfo.name': searchRegex },
+            { 'contactInfo.phone': searchRegex },
+            { 'contactInfo.email': searchRegex },
+            { 'contactInfo.passportOrEmiratesId': searchRegex },
+            // vehicleInfo (text fields)
+            { 'vehicleInfo.make': searchRegex },
+            { 'vehicleInfo.model': searchRegex },
+            { 'vehicleInfo.color': searchRegex },
+            { 'vehicleInfo.trim': searchRegex },
+            { 'vehicleInfo.region': searchRegex },
+            { 'vehicleInfo.vin': searchRegex },
+            { 'vehicleInfo.description': searchRegex }
+        ];
+
+        // Handle numeric fields - only search if query is numeric
+        const isNumeric = /^\d+$/.test(searchQuery);
+        if (isNumeric) {
+            const numericValue = parseFloat(searchQuery);
+            // Search in numeric fields as strings (converted to string for comparison)
+            // We'll search for exact match or partial match by converting to string
+            searchConditions.push(
+                { 'vehicleInfo.year': numericValue },
+                { 'vehicleInfo.mileage': numericValue },
+                { 'vehicleInfo.askingPrice': numericValue },
+                { 'vehicleInfo.expectedPrice': numericValue }
+            );
+        } else {
+            // For non-numeric queries, search numeric fields as strings using regex
+            // But we need to convert numbers to strings for regex matching
+            // Since Mongoose can't do this directly, we'll exclude exact numeric matches
+            // and only search text representation
+            // Note: For year, mileage, and prices, we can't use regex on numbers
+            // So we'll skip them for non-numeric queries or handle them differently
+            // Actually, we can use $expr with $toString to convert numbers to strings for regex
+            const numericFieldsRegex = [
+                { $expr: { $regexMatch: { input: { $toString: '$vehicleInfo.year' }, regex: searchQuery, options: 'i' } } },
+                { $expr: { $regexMatch: { input: { $toString: '$vehicleInfo.mileage' }, regex: searchQuery, options: 'i' } } },
+                { $expr: { $regexMatch: { input: { $toString: '$vehicleInfo.askingPrice' }, regex: searchQuery, options: 'i' } } },
+                { $expr: { $regexMatch: { input: { $toString: '$vehicleInfo.expectedPrice' }, regex: searchQuery, options: 'i' } } }
+            ];
+            searchConditions.push(...numericFieldsRegex);
+        }
+
+        // Search across all lead fields specified by user
+        const leads = await Lead.find({
+            $or: searchConditions
+        })
+            .select('leadId contactInfo vehicleInfo attachments status type')
+            .limit(20)
+            .sort({ createdAt: -1 });
+
+        // Format results with image URL
+        const formattedLeads = leads.map(lead => {
+            const carPictures = (lead.attachments || []).filter(a => a.category === 'carPictures');
+            const firstImage = carPictures.length > 0 ? carPictures[0].url : null;
+
+            return {
+                _id: lead._id,
+                leadId: lead.leadId,
+                contactInfo: lead.contactInfo,
+                vehicleInfo: lead.vehicleInfo,
+                status: lead.status,
+                type: lead.type,
+                imageUrl: firstImage
+            };
+        });
+
+        res.status(200).json({
+            success: true,
+            count: formattedLeads.length,
+            data: formattedLeads
+        });
+    } catch (error) {
+        logger.error('Search leads error:', error);
         next(error);
     }
 };

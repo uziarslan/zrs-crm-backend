@@ -104,7 +104,16 @@ exports.exportLeads = async (req, res, next) => {
 
         const query = {};
         if (type) query.type = type;
-        if (status) query.status = status;
+
+        // Handle status - support multiple statuses (for Leads.js which shows both 'new' and 'cancelled')
+        if (status) {
+            if (status.includes(',')) {
+                // Multiple statuses
+                query.status = { $in: status.split(',').map(s => s.trim()) };
+            } else {
+                query.status = status;
+            }
+        }
 
         const leads = await Lead.find(query)
             .populate('assignedTo', 'name')
@@ -114,18 +123,40 @@ exports.exportLeads = async (req, res, next) => {
         const workbook = new ExcelJS.Workbook();
         const worksheet = workbook.addWorksheet('Leads');
 
-        // Add headers
+        // Add headers with all requested fields
         worksheet.columns = [
+            // Lead Basic Info
             { header: 'Lead ID', key: 'leadId', width: 15 },
             { header: 'Type', key: 'type', width: 10 },
-            { header: 'Contact Name', key: 'contactName', width: 20 },
-            { header: 'Phone', key: 'phone', width: 15 },
-            { header: 'Email', key: 'email', width: 25 },
             { header: 'Source', key: 'source', width: 15 },
             { header: 'Status', key: 'status', width: 15 },
             { header: 'Priority', key: 'priority', width: 10 },
             { header: 'Assigned To', key: 'assignedTo', width: 20 },
-            { header: 'Vehicle Info', key: 'vehicleInfo', width: 30 },
+
+            // Contact Information
+            { header: 'Contact Name', key: 'contactName', width: 20 },
+            { header: 'Phone', key: 'phone', width: 15 },
+            { header: 'Email', key: 'email', width: 25 },
+            { header: 'Passport/Emirates ID', key: 'passportOrEmiratesId', width: 20 },
+
+            // Vehicle Information
+            { header: 'Make', key: 'make', width: 15 },
+            { header: 'Model', key: 'model', width: 20 },
+            { header: 'Year', key: 'year', width: 10 },
+            { header: 'Mileage', key: 'mileage', width: 12 },
+            { header: 'Color', key: 'color', width: 12 },
+            { header: 'Trim', key: 'trim', width: 15 },
+            { header: 'Region', key: 'region', width: 12 },
+            { header: 'VIN', key: 'vin', width: 20 },
+            { header: 'Asking Price', key: 'askingPrice', width: 15 },
+            { header: 'Expected Price', key: 'expectedPrice', width: 15 },
+
+            // Price Analysis
+            { header: 'Min Selling Price', key: 'minSellingPrice', width: 18 },
+            { header: 'Max Selling Price', key: 'maxSellingPrice', width: 18 },
+            { header: 'Purchased Final Price', key: 'purchasedFinalPrice', width: 20 },
+
+            // Metadata
             { header: 'Created At', key: 'createdAt', width: 15 }
         ];
 
@@ -140,22 +171,40 @@ exports.exportLeads = async (req, res, next) => {
 
         // Add data
         leads.forEach(lead => {
-            const vehicleInfo = lead.vehicleInfo?.make
-                ? `${lead.vehicleInfo.make} ${lead.vehicleInfo.model} ${lead.vehicleInfo.year || ''}`
-                : 'N/A';
-
             worksheet.addRow({
-                leadId: lead.leadId,
-                type: lead.type,
-                contactName: lead.contactInfo.name,
-                phone: lead.contactInfo.phone || '',
-                email: lead.contactInfo.email || '',
-                source: lead.source,
-                status: lead.status,
-                priority: lead.priority,
+                // Lead Basic Info
+                leadId: lead.leadId || '',
+                type: lead.type || '',
+                source: lead.source || '',
+                status: lead.status || '',
+                priority: lead.priority || '',
                 assignedTo: lead.assignedTo?.name || 'Unassigned',
-                vehicleInfo: vehicleInfo,
-                createdAt: lead.createdAt.toLocaleDateString()
+
+                // Contact Information
+                contactName: lead.contactInfo?.name || '',
+                phone: lead.contactInfo?.phone || '',
+                email: lead.contactInfo?.email || '',
+                passportOrEmiratesId: lead.contactInfo?.passportOrEmiratesId || '',
+
+                // Vehicle Information
+                make: lead.vehicleInfo?.make || '',
+                model: lead.vehicleInfo?.model || '',
+                year: lead.vehicleInfo?.year || '',
+                mileage: lead.vehicleInfo?.mileage || '',
+                color: lead.vehicleInfo?.color || '',
+                trim: lead.vehicleInfo?.trim || '',
+                region: lead.vehicleInfo?.region || '',
+                vin: lead.vehicleInfo?.vin || '',
+                askingPrice: lead.vehicleInfo?.askingPrice || '',
+                expectedPrice: lead.vehicleInfo?.expectedPrice || '',
+
+                // Price Analysis
+                minSellingPrice: lead.priceAnalysis?.minSellingPrice || '',
+                maxSellingPrice: lead.priceAnalysis?.maxSellingPrice || '',
+                purchasedFinalPrice: lead.priceAnalysis?.purchasedFinalPrice || '',
+
+                // Metadata
+                createdAt: lead.createdAt ? new Date(lead.createdAt).toLocaleDateString() : ''
             });
         });
 
@@ -164,9 +213,23 @@ exports.exportLeads = async (req, res, next) => {
             'Content-Type',
             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         );
+
+        // Generate filename based on status
+        let filename = 'leads';
+        if (status) {
+            if (status.includes(',')) {
+                filename = `leads_${status.split(',').map(s => s.trim()).join('_')}`;
+            } else {
+                filename = `leads_${status}`;
+            }
+        }
+        if (type) {
+            filename = `${type}_${filename}`;
+        }
+
         res.setHeader(
             'Content-Disposition',
-            `attachment; filename=leads_${Date.now()}.xlsx`
+            `attachment; filename=${filename}_${Date.now()}.xlsx`
         );
 
         // Write to response

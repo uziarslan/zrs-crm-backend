@@ -58,8 +58,7 @@ const leadSchema = new mongoose.Schema({
         region: String,
         vin: String,
         askingPrice: Number,
-        expectedPrice: Number,
-        description: String
+        expectedPrice: Number
     },
     notes: [{
         content: String,
