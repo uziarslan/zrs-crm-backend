@@ -591,9 +591,16 @@ exports.getVehicleById = async (req, res, next) => {
     try {
         const lead = await Lead.findById(req.params.id)
             .populate('investor', 'name email')
-            .populate('createdBy', 'name email');
+            .populate('createdBy', 'name email')
+            .populate({
+                path: 'purchaseOrder',
+                populate: {
+                    path: 'investorAllocations.investorId',
+                    select: 'name email'
+                }
+            });
 
-        if (!lead || lead.status !== 'inventory') {
+        if (!lead || (lead.status !== 'inventory' && lead.status !== 'consignment')) {
             return res.status(404).json({
                 success: false,
                 message: 'Inventory item not found'
@@ -628,7 +635,11 @@ exports.getVehicleById = async (req, res, next) => {
             minSellingPrice: lead.priceAnalysis?.minSellingPrice,
             maxSellingPrice: lead.priceAnalysis?.maxSellingPrice,
             attachments: lead.attachments || [],
+            contactInfo: lead.contactInfo || {},
             investor: lead.investor,
+            investorAllocation: lead.purchaseOrder?.investorAllocations || [],
+            purchaseOrder: lead.purchaseOrder,
+            operationalChecklist: lead.operationalChecklist || {},
             createdBy: lead.createdBy,
             createdAt: lead.createdAt,
             updatedAt: lead.updatedAt
@@ -653,8 +664,11 @@ exports.getInventory = async (req, res, next) => {
     try {
         const { status, make, model, search } = req.query;
 
+        // Include both inventory and consignment by default, or filter by provided status
         const query = {
-            status: 'inventory'
+            status: status && (status === 'inventory' || status === 'consignment')
+                ? status
+                : { $in: ['inventory', 'consignment'] }
         };
 
         if (make) query['vehicleInfo.make'] = { $regex: make, $options: 'i' };
@@ -693,6 +707,7 @@ exports.getInventory = async (req, res, next) => {
             minSellingPrice: lead.priceAnalysis?.minSellingPrice,
             maxSellingPrice: lead.priceAnalysis?.maxSellingPrice,
             attachments: lead.attachments || [],
+            operationalChecklist: lead.operationalChecklist || {},
             investor: lead.investor,
             createdBy: lead.createdBy,
             createdAt: lead.createdAt,
@@ -2491,7 +2506,7 @@ exports.getSignedDocument = async (req, res, next) => {
 };
 
 // Update vehicle checklist
-const updateVehicleChecklist = async (req, res) => {
+const updateVehicleChecklist = async (req, res, next) => {
     try {
         const { id } = req.params;
         const { item, completed, notes, completedBy, completedAt } = req.body;
@@ -2513,52 +2528,70 @@ const updateVehicleChecklist = async (req, res) => {
             });
         }
 
-        // Find the vehicle
-        const vehicle = await Vehicle.findById(id);
-        if (!vehicle) {
+        // Find the lead (vehicle)
+        const lead = await Lead.findById(id);
+        if (!lead) {
             return res.status(404).json({
                 success: false,
                 message: 'Vehicle not found'
             });
         }
 
-        // Update the checklist item
-        if (!vehicle.operationalChecklist) {
-            vehicle.operationalChecklist = {};
+        // Only allow updating checklist for inventory or consignment leads
+        if (lead.status !== 'inventory' && lead.status !== 'consignment') {
+            return res.status(400).json({
+                success: false,
+                message: 'Checklist can only be updated for inventory or consignment vehicles'
+            });
         }
 
-        vehicle.operationalChecklist[item] = {
-            completed: completed || false,
+        // Update the checklist item
+        if (!lead.operationalChecklist) {
+            lead.operationalChecklist = {};
+        }
+
+        // Handle completedAt - convert to Date if it's a string, or use new Date() if completed is true
+        let completedAtDate = null;
+        if (completed) {
+            if (completedAt) {
+                completedAtDate = completedAt instanceof Date ? completedAt : new Date(completedAt);
+            } else {
+                completedAtDate = new Date();
+            }
+        }
+
+        lead.operationalChecklist[item] = {
+            completed: completed === true || completed === 'true',
             notes: notes || '',
             completedBy: completedBy || req.userId,
-            completedAt: completed ? (completedAt || new Date()) : null
+            completedAt: completedAtDate
         };
 
-        // Update the vehicle
-        await vehicle.save();
+        // Mark the operationalChecklist field as modified (required for Mixed type fields)
+        lead.markModified('operationalChecklist');
 
-        logger.info(`Vehicle checklist updated: ${vehicle.vehicleId} - ${item}`, {
-            vehicleId: vehicle._id,
+        // Update the lead
+        await lead.save();
+
+        logger.info(`Vehicle checklist updated: ${lead.leadId} - ${item}`, {
+            leadId: lead._id,
             item,
             completed,
             updatedBy: req.userId
         });
 
-        res.json({
+        res.status(200).json({
             success: true,
             message: 'Checklist updated successfully',
             data: {
-                vehicle: vehicle,
-                checklistItem: vehicle.operationalChecklist[item]
+                vehicle: lead,
+                checklistItem: lead.operationalChecklist[item]
             }
         });
 
     } catch (error) {
         logger.error('Update vehicle checklist error:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to update checklist'
-        });
+        next(error);
     }
 };
 

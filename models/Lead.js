@@ -30,6 +30,7 @@ const leadSchema = new mongoose.Schema({
             'under_review',
             'approved',
             'inventory',
+            'consignment',
             'lost',
             'cancelled'
         ],
@@ -164,6 +165,10 @@ const leadSchema = new mongoose.Schema({
         type: String,
         enum: ['low', 'medium', 'high', 'urgent'],
         default: 'medium'
+    },
+    operationalChecklist: {
+        type: mongoose.Schema.Types.Mixed,
+        default: {}
     },
     createdBy: {
         type: mongoose.Schema.Types.ObjectId,

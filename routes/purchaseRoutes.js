@@ -295,6 +295,9 @@ router.put(
     authenticate,
     isAdminOrManager,
     mongoIdValidation,
+    body('item').notEmpty().withMessage('Checklist item is required'),
+    body('completed').optional().isBoolean().withMessage('Completed must be a boolean'),
+    body('notes').optional().isString().withMessage('Notes must be a string'),
     validate,
     purchaseController.updateVehicleChecklist
 );
