@@ -1,5 +1,6 @@
 const Lead = require('../models/Lead');
 const PurchaseOrder = require('../models/PurchaseOrder');
+const Invoice = require('../models/Invoice');
 /**
  * @desc    Upsert a draft Purchase Order for a Lead with required cost fields
  * @route   PUT /api/v1/purchases/leads/:id/purchase-order
@@ -222,7 +223,15 @@ exports.getLeadById = async (req, res, next) => {
             .populate('notes.addedBy', 'name email')
             .populate('notes.editedBy', 'name email')
             .populate('followUps')
-            .populate('purchaseOrder');
+            .populate({
+                path: 'purchaseOrder',
+                populate: {
+                    path: 'investorAllocations.investorId',
+                    select: 'name email'
+                }
+            })
+            .populate('invoice')
+            .populate('investor', 'name email');
 
         if (!lead) {
             return res.status(404).json({
@@ -598,7 +607,8 @@ exports.getVehicleById = async (req, res, next) => {
                     path: 'investorAllocations.investorId',
                     select: 'name email'
                 }
-            });
+            })
+            .populate('invoice');
 
         if (!lead || (lead.status !== 'inventory' && lead.status !== 'consignment')) {
             return res.status(404).json({
@@ -639,6 +649,7 @@ exports.getVehicleById = async (req, res, next) => {
             investor: lead.investor,
             investorAllocation: lead.purchaseOrder?.investorAllocations || [],
             purchaseOrder: lead.purchaseOrder,
+            invoice: lead.invoice,
             operationalChecklist: lead.operationalChecklist || {},
             createdBy: lead.createdBy,
             createdAt: lead.createdAt,
@@ -1774,6 +1785,134 @@ exports.convertLeadToVehicle = async (req, res, next) => {
 
         logger.info(`Lead ${lead.leadId} moved to inventory and Purchase Order ${purchaseOrder.poId} completed`);
 
+        // Generate and send invoice
+        const invoiceDate = new Date();
+        const buyingPrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
+        const transferCost = Number(purchaseOrder.transferCost || 0);
+        const detailingInspectionCost = Number(purchaseOrder.detailing_inspection_cost || 0);
+        const agentCommission = Number(purchaseOrder.agent_commision || 0);
+        const carRecoveryCost = Number(purchaseOrder.car_recovery_cost || 0);
+        const otherCharges = Number(purchaseOrder.other_charges || 0);
+        const totalPayable = buyingPrice + transferCost + detailingInspectionCost + agentCommission + carRecoveryCost + otherCharges;
+
+        // Create and save invoice record (status: sent)
+        const Invoice = require('../models/Invoice');
+        const invoice = await Invoice.create({
+            leadId: lead._id,
+            purchaseOrderId: purchaseOrder._id,
+            investorId: lead.investor?._id || lead.investor,
+            preparedBy: purchaseOrder.prepared_by || req.user?.name || req.user?.email,
+            totals: {
+                buying_price: buyingPrice,
+                transfer_cost_rta: transferCost,
+                detailing_inspection_cost: detailingInspectionCost,
+                agent_commission: agentCommission,
+                car_recovery_cost: carRecoveryCost,
+                other_charges: otherCharges,
+                total_amount_payable: totalPayable
+            },
+            vehicle: {
+                make: lead.vehicleInfo?.make || '',
+                model: lead.vehicleInfo?.model || '',
+                trim: lead.vehicleInfo?.trim || '',
+                year: lead.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
+                vin: lead.vehicleInfo?.vin || ''
+            },
+            status: 'sent',
+            sentAt: new Date()
+        });
+
+        // Prepare data for invoice PDF generation
+        const invoiceData = {
+            invoiceNo: invoice.invoiceNo,
+            date: invoiceDate.toLocaleDateString('en-GB'),
+            investorName: lead.investor?.name || 'Investor',
+            preparedBy: purchaseOrder.prepared_by || req.user?.name || req.user?.email || 'Admin',
+            referencePoNo: purchaseOrder.poId,
+            carMake: lead.vehicleInfo?.make || '',
+            carModel: lead.vehicleInfo?.model || '',
+            trim: lead.vehicleInfo?.trim || '',
+            yearModel: lead.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
+            chassisNo: lead.vehicleInfo?.vin || '',
+            region: lead.vehicleInfo?.region || '',
+            buyingPrice: buyingPrice,
+            transferCost: transferCost,
+            detailingInspectionCost: detailingInspectionCost,
+            otherCharges: otherCharges,
+            totalAmountPayable: totalPayable,
+            // Payment (from request body or defaults)
+            modeOfPayment: req.body.modeOfPayment || 'Bank Transfer / Cash / Cheque',
+            paymentReceivedBy: req.body.paymentReceivedBy || 'Authorized Person',
+            dateOfPayment: invoiceDate.toLocaleDateString('en-GB')
+        };
+
+        const investorEmail = lead.investor?.email;
+        if (investorEmail) {
+            try {
+                // Generate HTML -> PDF via Puppeteer
+                const { generateInvoicePdfBuffer } = require('../services/invoicePdfService');
+                const pdfBuffer = await generateInvoicePdfBuffer({
+                    invoice_no: invoiceData.invoiceNo,
+                    date: invoiceData.date,
+                    investor_name: invoiceData.investorName,
+                    prepared_by: invoiceData.preparedBy,
+                    reference_po_no: invoiceData.referencePoNo,
+                    car_make: invoiceData.carMake,
+                    car_model: invoiceData.carModel,
+                    trim: invoiceData.trim,
+                    year_model: invoiceData.yearModel,
+                    chassis_no: invoiceData.chassisNo,
+                    buying_price: buyingPrice,
+                    transfer_cost: transferCost,
+                    detailing_inspection_cost: detailingInspectionCost,
+                    agent_commission: agentCommission,
+                    car_recovery_cost: carRecoveryCost,
+                    other_charges: otherCharges,
+                    total_amount_payable: totalPayable,
+                    mode_of_payment: invoiceData.modeOfPayment,
+                    payment_received_by: invoiceData.paymentReceivedBy,
+                    date_of_payment: invoiceData.dateOfPayment
+                });
+
+                // Store base64 content directly on invoice
+                const pdfBase64 = pdfBuffer.toString('base64');
+                invoice.content = pdfBase64;
+                invoice.mimeType = 'application/pdf';
+                invoice.fileSize = pdfBuffer.length;
+                invoice.filePublicId = undefined;
+                await invoice.save();
+
+                // Store invoice reference in the lead
+                lead.invoice = invoice._id;
+                await lead.save();
+
+                // Email investor via Mailtrap API
+                const { sendMailtrapEmail } = require('../services/mailtrapService');
+                await sendMailtrapEmail({
+                    recipients: [investorEmail],
+                    templateUuid: process.env.PURCHASE_ORDER_INVOICE_ID || undefined,
+                    templateVariables: {
+                        investor_name: invoiceData.investorName,
+                        po_number: invoiceData.referencePoNo,
+                        issue_date: invoiceData.date,
+                        total_amount: `AED ${totalPayable.toLocaleString()}`,
+                        year: invoiceData.yearModel || ''
+                    },
+                    attachments: [{
+                        filename: `Invoice_${invoice.invoiceNo}.pdf`,
+                        content: pdfBase64,
+                        type: 'application/pdf',
+                        disposition: 'attachment'
+                    }]
+                });
+
+                logger.info(`Invoice ${invoice.invoiceNo} generated and emailed to investor`);
+            } catch (invoiceErr) {
+                logger.error('Failed to generate and send invoice:', invoiceErr);
+                // Continue even if invoice fails - don't block the purchase
+            }
+        }
+
         // Audit log
         await logLead(req, 'lead_moved_to_inventory',
             `Lead ${lead.leadId} moved to inventory`,
@@ -1799,11 +1938,239 @@ exports.convertLeadToVehicle = async (req, res, next) => {
                     poId: purchaseOrder.poId,
                     status: purchaseOrder.status,
                     amount: purchaseOrder.amount
-                }
+                },
+                invoice: invoice ? {
+                    invoiceNo: invoice.invoiceNo,
+                    sent: !!investorEmail
+                } : null
             }
         });
     } catch (error) {
         logger.error('Convert lead to vehicle error:', error);
+        next(error);
+    }
+};
+
+/**
+ * @desc    Bulk convert leads to vehicles with invoice payment details
+ * @route   POST /api/v1/purchases/leads/bulk-purchase
+ * @access  Private (Admin only)
+ */
+exports.bulkConvertLeadsToVehicles = async (req, res, next) => {
+    try {
+        const { leads } = req.body; // Array of { leadId, modeOfPayment, paymentReceivedBy }
+
+        if (!leads || !Array.isArray(leads) || leads.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please provide an array of leads with payment details'
+            });
+        }
+
+        const results = [];
+        const errors = [];
+
+        for (const leadData of leads) {
+            const { leadId, modeOfPayment, paymentReceivedBy } = leadData;
+
+            if (!leadId) {
+                errors.push({ leadId: leadId || 'unknown', error: 'Lead ID is required' });
+                continue;
+            }
+
+            try {
+                const lead = await Lead.findById(leadId)
+                    .populate('investor')
+                    .populate('createdBy');
+
+                if (!lead) {
+                    errors.push({ leadId, error: 'Lead not found' });
+                    continue;
+                }
+
+                if (!lead.purchaseOrder) {
+                    errors.push({ leadId, error: 'Lead must have a purchase order' });
+                    continue;
+                }
+
+                const purchaseOrder = await PurchaseOrder.findById(lead.purchaseOrder);
+                if (!purchaseOrder || !purchaseOrder.docuSignEnvelopeId || purchaseOrder.docuSignStatus !== 'completed') {
+                    errors.push({ leadId, error: 'Purchase Agreement must be signed' });
+                    continue;
+                }
+
+                if (lead.status === 'inventory') {
+                    errors.push({ leadId, error: 'Lead is already in inventory' });
+                    continue;
+                }
+
+                // Update investor utilization
+                const investorId = lead.investor?._id || lead.investor;
+                if (investorId && lead.priceAnalysis?.purchasedFinalPrice) {
+                    try {
+                        await Investor.findByIdAndUpdate(investorId, {
+                            $inc: { utilizedAmount: lead.priceAnalysis.purchasedFinalPrice },
+                            $push: {
+                                investments: {
+                                    leadId: lead._id,
+                                    amount: lead.priceAnalysis.purchasedFinalPrice,
+                                    percentage: 100,
+                                    date: new Date(),
+                                    status: 'active'
+                                }
+                            }
+                        });
+                    } catch (invErr) {
+                        logger.error(`Failed to update investor utilization for lead ${leadId}:`, invErr);
+                    }
+                }
+
+                // Update Purchase Order status
+                purchaseOrder.status = 'completed';
+                await purchaseOrder.save();
+
+                // Update lead status to inventory
+                lead.status = 'inventory';
+                await lead.save();
+
+                // Generate and send invoice
+                const invoiceDate = new Date();
+                const buyingPrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
+                const transferCost = Number(purchaseOrder.transferCost || 0);
+                const detailingInspectionCost = Number(purchaseOrder.detailing_inspection_cost || 0);
+                const agentCommission = Number(purchaseOrder.agent_commision || 0);
+                const carRecoveryCost = Number(purchaseOrder.car_recovery_cost || 0);
+                const otherCharges = Number(purchaseOrder.other_charges || 0);
+                const totalPayable = buyingPrice + transferCost + detailingInspectionCost + agentCommission + carRecoveryCost + otherCharges;
+
+                const invoice = await Invoice.create({
+                    leadId: lead._id,
+                    purchaseOrderId: purchaseOrder._id,
+                    investorId: lead.investor?._id || lead.investor,
+                    preparedBy: purchaseOrder.prepared_by || req.user?.name || req.user?.email,
+                    totals: {
+                        buying_price: buyingPrice,
+                        transfer_cost_rta: transferCost,
+                        detailing_inspection_cost: detailingInspectionCost,
+                        agent_commission: agentCommission,
+                        car_recovery_cost: carRecoveryCost,
+                        other_charges: otherCharges,
+                        total_amount_payable: totalPayable
+                    },
+                    vehicle: {
+                        make: lead.vehicleInfo?.make || '',
+                        model: lead.vehicleInfo?.model || '',
+                        trim: lead.vehicleInfo?.trim || '',
+                        year: lead.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
+                        vin: lead.vehicleInfo?.vin || ''
+                    },
+                    status: 'sent',
+                    sentAt: new Date()
+                });
+
+                const invoiceData = {
+                    invoiceNo: invoice.invoiceNo,
+                    date: invoiceDate.toLocaleDateString('en-GB'),
+                    investorName: lead.investor?.name || 'Investor',
+                    preparedBy: purchaseOrder.prepared_by || req.user?.name || req.user?.email || 'Admin',
+                    referencePoNo: purchaseOrder.poId,
+                    carMake: lead.vehicleInfo?.make || '',
+                    carModel: lead.vehicleInfo?.model || '',
+                    trim: lead.vehicleInfo?.trim || '',
+                    yearModel: lead.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
+                    chassisNo: lead.vehicleInfo?.vin || '',
+                    region: lead.vehicleInfo?.region || '',
+                    buyingPrice: buyingPrice,
+                    transferCost: transferCost,
+                    detailingInspectionCost: detailingInspectionCost,
+                    otherCharges: otherCharges,
+                    totalAmountPayable: totalPayable,
+                    modeOfPayment: modeOfPayment || 'Bank Transfer / Cash / Cheque',
+                    paymentReceivedBy: paymentReceivedBy || 'Authorized Person',
+                    dateOfPayment: invoiceDate.toLocaleDateString('en-GB')
+                };
+
+                const investorEmail = lead.investor?.email;
+                if (investorEmail) {
+                    try {
+                        const { generateInvoicePdfBuffer } = require('../services/invoicePdfService');
+                        const pdfBuffer = await generateInvoicePdfBuffer({
+                            invoice_no: invoiceData.invoiceNo,
+                            date: invoiceData.date,
+                            investor_name: invoiceData.investorName,
+                            prepared_by: invoiceData.preparedBy,
+                            reference_po_no: invoiceData.referencePoNo,
+                            car_make: invoiceData.carMake,
+                            car_model: invoiceData.carModel,
+                            trim: invoiceData.trim,
+                            year_model: invoiceData.yearModel,
+                            chassis_no: invoiceData.chassisNo,
+                            buying_price: buyingPrice,
+                            transfer_cost: transferCost,
+                            detailing_inspection_cost: detailingInspectionCost,
+                            agent_commission: agentCommission,
+                            car_recovery_cost: carRecoveryCost,
+                            other_charges: otherCharges,
+                            total_amount_payable: totalPayable,
+                            mode_of_payment: invoiceData.modeOfPayment,
+                            payment_received_by: invoiceData.paymentReceivedBy,
+                            date_of_payment: invoiceData.dateOfPayment
+                        });
+
+                        const pdfBase64 = pdfBuffer.toString('base64');
+                        invoice.content = pdfBase64;
+                        invoice.mimeType = 'application/pdf';
+                        invoice.fileSize = pdfBuffer.length;
+                        invoice.filePublicId = undefined;
+                        await invoice.save();
+
+                        lead.invoice = invoice._id;
+                        await lead.save();
+
+                        const { sendMailtrapEmail } = require('../services/mailtrapService');
+                        await sendMailtrapEmail({
+                            recipients: [investorEmail],
+                            templateUuid: process.env.PURCHASE_ORDER_INVOICE_ID || undefined,
+                            templateVariables: {
+                                investor_name: invoiceData.investorName,
+                                po_number: invoiceData.referencePoNo,
+                                issue_date: invoiceData.date,
+                                total_amount: `AED ${totalPayable.toLocaleString()}`,
+                                year: invoiceData.yearModel || ''
+                            },
+                            attachments: [{
+                                filename: `Invoice_${invoice.invoiceNo}.pdf`,
+                                content: pdfBase64,
+                                type: 'application/pdf',
+                                disposition: 'attachment'
+                            }]
+                        });
+                    } catch (invoiceErr) {
+                        logger.error(`Failed to generate invoice for lead ${leadId}:`, invoiceErr);
+                    }
+                }
+
+                results.push({
+                    leadId: lead.leadId,
+                    success: true,
+                    invoiceNo: invoice.invoiceNo
+                });
+            } catch (err) {
+                logger.error(`Error processing lead ${leadId}:`, err);
+                errors.push({ leadId, error: err.message || 'Unknown error' });
+            }
+        }
+
+        res.status(200).json({
+            success: true,
+            message: `Processed ${results.length} lead(s) successfully${errors.length > 0 ? `, ${errors.length} failed` : ''}`,
+            data: {
+                successful: results,
+                errors: errors
+            }
+        });
+    } catch (error) {
+        logger.error('Bulk convert leads to vehicles error:', error);
         next(error);
     }
 };
@@ -1845,229 +2212,7 @@ module.exports = exports;
  * @route   GET /api/v1/purchases/invoices/preview
  * @access  Private (Admin)
  */
-exports.previewInvoice = async (req, res, next) => {
-    try {
-        // If a leadId is provided, attempt to build from real data; else use sample
-        let invoiceData;
-        if (req.query.leadId) {
-            const Lead = require('../models/Lead');
-            const PurchaseOrder = require('../models/PurchaseOrder');
-            const lead = await Lead.findById(req.query.leadId).populate('investor', 'name email');
-            let po = null;
-            if (lead?.purchaseOrder) {
-                po = await PurchaseOrder.findById(lead.purchaseOrder);
-            }
-            const buyingPrice = Number(lead?.priceAnalysis?.purchasedFinalPrice || 0);
-            const transferCost = Number(po?.transferCost || 0);
-            const detailingInspectionCost = Number(po?.detailing_inspection_cost || 0);
-            const agentCommission = Number(po?.agent_commision || 0);
-            const carRecoveryCost = Number(po?.car_recovery_cost || 0);
-            const otherCharges = Number(po?.other_charges || 0);
-            const totalPayable = buyingPrice + transferCost + detailingInspectionCost + agentCommission + carRecoveryCost + otherCharges;
-
-            invoiceData = {
-                invoice_no: 'PREVIEW-' + (po?.poId || 'POXXXX'),
-                date: new Date().toLocaleDateString('en-GB'),
-                investor_name: lead?.investor?.name || 'Investor',
-                prepared_by: po?.prepared_by || req.user?.name || req.user?.email || 'Admin',
-                reference_po_no: po?.poId || 'POXXXX',
-                car_make: lead?.vehicleInfo?.make || '',
-                car_model: lead?.vehicleInfo?.model || '',
-                trim: lead?.vehicleInfo?.trim || '',
-                year_model: lead?.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
-                chassis_no: lead?.vehicleInfo?.vin || '',
-                buying_price: buyingPrice,
-                transfer_cost: transferCost,
-                detailing_inspection_cost: detailingInspectionCost,
-                agent_commission: agentCommission,
-                car_recovery_cost: carRecoveryCost,
-                other_charges: otherCharges,
-                total_amount_payable: totalPayable,
-                mode_of_payment: 'Bank Transfer',
-                payment_received_by: po?.prepared_by || 'Authorized Person',
-                date_of_payment: new Date().toLocaleDateString('en-GB')
-            };
-        } else {
-            invoiceData = {
-                invoice_no: 'PREVIEW-0001',
-                date: new Date().toLocaleDateString('en-GB'),
-                investor_name: 'John Doe',
-                prepared_by: 'Admin User',
-                reference_po_no: 'PO0001',
-                car_make: 'Toyota',
-                car_model: 'Camry',
-                trim: 'SE',
-                year_model: '2021',
-                chassis_no: 'JT1234567890ABCDF',
-                buying_price: 50000,
-                transfer_cost: 850,
-                detailing_inspection_cost: 300,
-                agent_commission: 0,
-                car_recovery_cost: 0,
-                other_charges: 0,
-                total_amount_payable: 51150,
-                mode_of_payment: 'Bank Transfer',
-                payment_received_by: 'Authorized Person',
-                date_of_payment: new Date().toLocaleDateString('en-GB')
-            };
-        }
-
-        const { generateInvoicePdfBuffer } = require('../services/invoicePdfService');
-        const pdfBuffer = await generateInvoicePdfBuffer(invoiceData);
-        res.set({
-            'Content-Type': 'application/pdf',
-            'Content-Disposition': 'inline; filename="invoice_preview.pdf"',
-            'Content-Length': pdfBuffer.length
-        });
-        res.send(pdfBuffer);
-    } catch (error) {
-        next(error);
-    }
-};
-/**
- * @desc    Send test invoice email to investor (no purchase action)
- * @route   POST /api/v1/purchases/po/:id/invoice/test
- * @access  Private (Admin)
- */
-exports.sendInvoiceTestEmail = async (req, res, next) => {
-    try {
-        const poId = req.params.id;
-        const purchaseOrder = await PurchaseOrder.findById(poId);
-        if (!purchaseOrder) {
-            return res.status(404).json({ success: false, message: 'Purchase Order not found' });
-        }
-
-        const lead = await Lead.findOne({ purchaseOrder: purchaseOrder._id }).populate('investor', 'name email');
-        if (!lead) {
-            return res.status(404).json({ success: false, message: 'Associated lead not found' });
-        }
-
-        // Build invoice variables
-        const invoiceDate = new Date();
-        const buyingPrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
-        const transferCost = Number(purchaseOrder.transferCost || 0);
-        const detailingInspectionCost = Number(purchaseOrder.detailing_inspection_cost || 0);
-        const agentCommission = Number(purchaseOrder.agent_commision || 0);
-        const carRecoveryCost = Number(purchaseOrder.car_recovery_cost || 0);
-        const otherCharges = Number(purchaseOrder.other_charges || 0);
-        const totalPayable = buyingPrice + transferCost + detailingInspectionCost + agentCommission + carRecoveryCost + otherCharges;
-
-        // Create and save invoice record (status: sent)
-        const Invoice = require('../models/Invoice');
-        const invoice = await Invoice.create({
-            leadId: lead._id,
-            purchaseOrderId: purchaseOrder._id,
-            investorId: lead.investor?._id || lead.investor,
-            preparedBy: purchaseOrder.prepared_by || req.user?.name || req.user?.email,
-            totals: {
-                buying_price: buyingPrice,
-                transfer_cost_rta: transferCost,
-                detailing_inspection_cost: detailingInspectionCost,
-                agent_commission: agentCommission,
-                car_recovery_cost: carRecoveryCost,
-                other_charges: otherCharges,
-                total_amount_payable: totalPayable
-            },
-            vehicle: {
-                make: lead.vehicleInfo?.make || '',
-                model: lead.vehicleInfo?.model || '',
-                trim: lead.vehicleInfo?.trim || '',
-                year: lead.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
-                vin: lead.vehicleInfo?.vin || ''
-            },
-            status: 'sent',
-            sentAt: new Date()
-        });
-
-        // Prepare data for documentService to generate PDF and send via Mailtrap
-        const invoiceData = {
-            invoiceNo: invoice.invoiceNo,
-            date: invoiceDate.toLocaleDateString('en-GB'),
-            investorName: lead.investor?.name || 'Investor',
-            preparedBy: purchaseOrder.prepared_by || req.user?.name || req.user?.email || 'Admin',
-            referencePoNo: purchaseOrder.poId,
-
-            // Vehicle
-            carMake: lead.vehicleInfo?.make || '',
-            carModel: lead.vehicleInfo?.model || '',
-            trim: lead.vehicleInfo?.trim || '',
-            yearModel: lead.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
-            chassisNo: lead.vehicleInfo?.vin || '',
-            region: lead.vehicleInfo?.region || '',
-
-            // Totals
-            buyingPrice: buyingPrice,
-            transferCost: transferCost,
-            detailingInspectionCost: detailingInspectionCost,
-            otherCharges: otherCharges,
-            totalAmountPayable: totalPayable,
-
-            // Payment (defaults for test)
-            modeOfPayment: 'Bank Transfer / Cash / Cheque',
-            paymentReceivedBy: 'Authorized Person',
-            dateOfPayment: invoiceDate.toLocaleDateString('en-GB')
-        };
-
-        const investorEmail = lead.investor?.email;
-        if (!investorEmail) {
-            return res.status(400).json({ success: false, message: 'Investor email not found' });
-        }
-
-        // Generate HTML -> PDF via Puppeteer
-        const { generateInvoicePdfBuffer } = require('../services/invoicePdfService');
-        const pdfBuffer = await generateInvoicePdfBuffer({
-            invoice_no: invoiceData.invoiceNo,
-            date: invoiceData.date,
-            investor_name: invoiceData.investorName,
-            prepared_by: invoiceData.preparedBy,
-            reference_po_no: invoiceData.referencePoNo,
-            car_make: invoiceData.carMake,
-            car_model: invoiceData.carModel,
-            trim: invoiceData.trim,
-            year_model: invoiceData.yearModel,
-            chassis_no: invoiceData.chassisNo,
-            buying_price: buyingPrice,
-            transfer_cost: transferCost,
-            detailing_inspection_cost: detailingInspectionCost,
-            other_charges: otherCharges,
-            total_amount_payable: totalPayable,
-            mode_of_payment: invoiceData.modeOfPayment,
-            payment_received_by: invoiceData.paymentReceivedBy,
-            date_of_payment: invoiceData.dateOfPayment
-        });
-
-        // Store base64 content directly on invoice (no Cloudinary)
-        const pdfBase64 = pdfBuffer.toString('base64');
-        invoice.content = pdfBase64;
-        invoice.mimeType = 'application/pdf';
-        invoice.fileSize = pdfBuffer.length;
-        invoice.filePublicId = undefined;
-        await invoice.save();
-
-        // Email investor via Mailtrap API (no SMTP)
-        const { sendMailtrapEmail } = require('../services/mailtrapService');
-        await sendMailtrapEmail({
-            recipients: [investorEmail],
-            templateUuid: process.env.PURCHASE_ORDER_INVOICE_ID || undefined,
-            templateVariables: {
-                investor_name: invoiceData.investorName,
-                po_number: invoiceData.referencePoNo,
-                invoice_no: invoice.invoiceNo,
-                total_amount_payable: `AED ${totalPayable.toLocaleString()}`
-            },
-            attachments: [{
-                filename: `Invoice_${invoice.invoiceNo}.pdf`,
-                content: pdfBase64,
-                type: 'application/pdf',
-                disposition: 'attachment'
-            }]
-        });
-
-        return res.status(200).json({ success: true, message: 'Invoice generated and emailed', data: { invoiceNo: invoice.invoiceNo } });
-    } catch (error) {
-        next(error);
-    }
-};
+// previewInvoice removed per requirements
 
 /**
  * @desc    List investors for assignment

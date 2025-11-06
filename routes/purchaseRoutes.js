@@ -184,6 +184,15 @@ router.post(
     purchaseController.convertLeadToVehicle
 );
 
+// Bulk convert leads to vehicles with invoice payment details
+router.post(
+    '/leads/bulk-purchase',
+    authenticate,
+    isAdmin,
+    validate,
+    purchaseController.bulkConvertLeadsToVehicles
+);
+
 router.post(
     '/leads/:id/documents',
     authenticate,
@@ -328,24 +337,6 @@ router.get(
     mongoIdValidation,
     validate,
     purchaseController.getSignedDocument
-);
-
-// Send test invoice email (no purchase action)
-router.post(
-    '/po/:id/invoice/test',
-    authenticate,
-    isAdmin,
-    mongoIdValidation,
-    validate,
-    purchaseController.sendInvoiceTestEmail
-);
-
-// Preview invoice inline (dev/admin)
-router.get(
-    '/invoices/preview',
-    authenticate,
-    isAdmin,
-    purchaseController.previewInvoice
 );
 
 module.exports = router;

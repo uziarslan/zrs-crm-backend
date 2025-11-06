@@ -155,6 +155,12 @@ const leadSchema = new mongoose.Schema({
         ref: 'PurchaseOrder',
         default: null
     },
+    // Reference to Invoice
+    invoice: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Invoice',
+        default: null
+    },
     rateAnalysis: {
         marketValue: Number,
         estimatedProfit: Number,
