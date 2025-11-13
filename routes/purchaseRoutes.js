@@ -40,6 +40,18 @@ router.post(
     purchaseController.createLead
 );
 
+router.post(
+    '/leads/bulk',
+    authenticate,
+    isAdmin,
+    body('leads').isArray().withMessage('leads must be an array'),
+    body('leads.*.contactInfo.name').notEmpty().withMessage('Contact name is required'),
+    body('leads.*.vehicleInfo.make').notEmpty().withMessage('Vehicle make is required'),
+    body('leads.*.vehicleInfo.model').notEmpty().withMessage('Vehicle model is required'),
+    validate,
+    purchaseController.bulkCreateLeads
+);
+
 router.get('/leads', authenticate, purchaseController.getLeads);
 
 router.put(
@@ -247,6 +259,25 @@ router.put(
     body('otherChargesInvestor').optional({ values: 'falsy' }).isMongoId().withMessage('otherChargesInvestor must be a valid investor ID'),
     validate,
     purchaseController.upsertLeadPurchaseOrder
+);
+
+// Upload invoice evidence for PO cost fields
+router.post(
+    '/po/:poId/cost-invoice-evidence/:costType',
+    authenticate,
+    isAdmin,
+    mongoIdValidation,
+    upload.single('invoice'),
+    purchaseController.uploadCostInvoiceEvidence
+);
+
+// Delete invoice evidence for PO cost fields
+router.delete(
+    '/po/:poId/cost-invoice-evidence/:costType',
+    authenticate,
+    isAdmin,
+    mongoIdValidation,
+    purchaseController.deleteCostInvoiceEvidence
 );
 
 router.put(

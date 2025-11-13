@@ -28,6 +28,89 @@ const invoiceSchema = new mongoose.Schema({
     fileSize: { type: Number },
     // Optional base64 content for direct storage/delivery when not using Cloudinary
     content: { type: String },
+    // Invoice evidence documents for each cost field
+    costInvoiceEvidence: {
+        transferCost: {
+            fileName: String,
+            fileType: String,
+            fileSize: Number,
+            url: String,
+            publicId: String,
+            uploadedBy: {
+                type: mongoose.Schema.Types.ObjectId,
+                refPath: 'costInvoiceEvidence.transferCost.uploadedByModel'
+            },
+            uploadedByModel: {
+                type: String,
+                enum: ['Admin', 'Manager']
+            },
+            uploadedAt: Date
+        },
+        detailingInspectionCost: {
+            fileName: String,
+            fileType: String,
+            fileSize: Number,
+            url: String,
+            publicId: String,
+            uploadedBy: {
+                type: mongoose.Schema.Types.ObjectId,
+                refPath: 'costInvoiceEvidence.detailingInspectionCost.uploadedByModel'
+            },
+            uploadedByModel: {
+                type: String,
+                enum: ['Admin', 'Manager']
+            },
+            uploadedAt: Date
+        },
+        agentCommission: {
+            fileName: String,
+            fileType: String,
+            fileSize: Number,
+            url: String,
+            publicId: String,
+            uploadedBy: {
+                type: mongoose.Schema.Types.ObjectId,
+                refPath: 'costInvoiceEvidence.agentCommission.uploadedByModel'
+            },
+            uploadedByModel: {
+                type: String,
+                enum: ['Admin', 'Manager']
+            },
+            uploadedAt: Date
+        },
+        carRecoveryCost: {
+            fileName: String,
+            fileType: String,
+            fileSize: Number,
+            url: String,
+            publicId: String,
+            uploadedBy: {
+                type: mongoose.Schema.Types.ObjectId,
+                refPath: 'costInvoiceEvidence.carRecoveryCost.uploadedByModel'
+            },
+            uploadedByModel: {
+                type: String,
+                enum: ['Admin', 'Manager']
+            },
+            uploadedAt: Date
+        },
+        otherCharges: {
+            fileName: String,
+            fileType: String,
+            fileSize: Number,
+            url: String,
+            publicId: String,
+            uploadedBy: {
+                type: mongoose.Schema.Types.ObjectId,
+                refPath: 'costInvoiceEvidence.otherCharges.uploadedByModel'
+            },
+            uploadedByModel: {
+                type: String,
+                enum: ['Admin', 'Manager']
+            },
+            uploadedAt: Date
+        }
+    },
     sentAt: { type: Date },
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now }

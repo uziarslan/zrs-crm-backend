@@ -226,6 +226,113 @@ exports.createLead = async (req, res, next) => {
 };
 
 /**
+ * @desc    Bulk create purchase leads
+ * @route   POST /api/v1/purchases/leads/bulk
+ * @access  Private (Admin only)
+ */
+exports.bulkCreateLeads = async (req, res, next) => {
+    try {
+        const { leads } = req.body;
+
+        if (!Array.isArray(leads) || leads.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Leads array is required and must not be empty'
+            });
+        }
+
+        const Manager = require('../models/Manager');
+        const createdLeads = [];
+        const errors = [];
+
+        for (let i = 0; i < leads.length; i++) {
+            try {
+                const leadData = leads[i];
+                
+                // Validate required fields
+                if (!leadData.contactInfo?.name || !leadData.vehicleInfo?.make || !leadData.vehicleInfo?.model) {
+                    errors.push({
+                        index: i,
+                        error: 'Missing required fields: name, make, or model'
+                    });
+                    continue;
+                }
+
+                // Validate assignedTo if provided
+                if (leadData.assignedTo) {
+                    const manager = await Manager.findById(leadData.assignedTo);
+                    if (!manager || manager.status !== 'active') {
+                        errors.push({
+                            index: i,
+                            error: `Invalid or inactive manager ID: ${leadData.assignedTo}`
+                        });
+                        continue;
+                    }
+                }
+
+                const leadPayload = {
+                    ...leadData,
+                    type: 'purchase',
+                    assignedTo: leadData.assignedTo || null,
+                    createdBy: req.userId,
+                    createdByModel: req.userRole === 'admin' ? 'Admin' : 'Manager'
+                };
+
+                const lead = await Lead.create(leadPayload);
+
+                // Get assigned manager details if applicable
+                let assignedManager = null;
+                if (lead.assignedTo) {
+                    assignedManager = await Manager.findById(lead.assignedTo).select('name email');
+                }
+
+                // Audit log
+                await logLead(req, 'lead_created', `Bulk created purchase lead ${lead.leadId} for ${lead.contactInfo.name}${assignedManager ? ` - Assigned to ${assignedManager.name}` : ' - Unassigned'}`, lead, {
+                    contactName: lead.contactInfo.name,
+                    contactPhone: lead.contactInfo.phone || 'N/A',
+                    contactEmail: lead.contactInfo.email || 'N/A',
+                    source: lead.source,
+                    vehicle: lead.vehicleInfo ? `${lead.vehicleInfo.make} ${lead.vehicleInfo.model} ${lead.vehicleInfo.year}` : 'N/A',
+                    askingPrice: lead.vehicleInfo?.askingPrice,
+                    priority: lead.priority,
+                    assignedManager: assignedManager ? {
+                        name: assignedManager.name,
+                        email: assignedManager.email
+                    } : 'Unassigned'
+                });
+
+                createdLeads.push(lead);
+            } catch (error) {
+                errors.push({
+                    index: i,
+                    error: error.message || 'Failed to create lead'
+                });
+                logger.error(`Bulk create lead error at index ${i}:`, error);
+            }
+        }
+
+        logger.info(`Bulk created ${createdLeads.length} purchase lead(s) by ${req.user.email}`);
+
+        res.status(201).json({
+            success: true,
+            message: `Successfully created ${createdLeads.length} lead(s)${errors.length > 0 ? `, ${errors.length} failed` : ''}`,
+            data: {
+                created: createdLeads,
+                errors: errors.length > 0 ? errors : undefined
+            },
+            stats: {
+                total: leads.length,
+                created: createdLeads.length,
+                failed: errors.length
+            }
+        });
+    } catch (error) {
+        logger.error('Bulk create leads error:', error);
+        next(error);
+    }
+};
+
+/**
  * @desc    Get all purchase leads
  * @route   GET /api/v1/purchases/leads
  * @access  Private
@@ -687,6 +794,14 @@ exports.getVehicleById = async (req, res, next) => {
             });
         }
 
+        // Fetch all invoices for this purchase order (one per investor)
+        const Invoice = require('../models/Invoice');
+        const allInvoices = lead.purchaseOrder
+            ? await Invoice.find({ purchaseOrderId: lead.purchaseOrder._id })
+                .populate('investorId', 'name email')
+                .sort({ createdAt: 1 })
+            : [];
+
         // Transform attachment URLs for inline PDF viewing
         const { getInlineViewUrl } = require('../cloudinary');
         if (lead.attachments) {
@@ -732,7 +847,8 @@ exports.getVehicleById = async (req, res, next) => {
             investor: investorSummary,
             investorAllocation: lead.purchaseOrder?.investorAllocations || [],
             purchaseOrder: lead.purchaseOrder,
-            invoice: lead.invoice,
+            invoice: lead.invoice, // Keep for backward compatibility
+            invoices: allInvoices, // Add all invoices array
             operationalChecklist: lead.operationalChecklist || {},
             createdBy: lead.createdBy,
             createdAt: lead.createdAt,
@@ -1578,6 +1694,213 @@ exports.viewDocument = async (req, res, next) => {
                 message: 'Document not found in Cloudinary'
             });
         }
+        next(error);
+    }
+};
+
+/**
+ * @desc    Upload invoice evidence for PO cost field
+ * @route   POST /api/v1/purchases/po/:poId/cost-invoice-evidence/:costType
+ * @access  Private (Admin)
+ */
+exports.uploadCostInvoiceEvidence = async (req, res, next) => {
+    try {
+        const { poId, costType } = req.params;
+        const { cloudinary } = require('../cloudinary');
+        const Invoice = require('../models/Invoice');
+
+        const purchaseOrder = await PurchaseOrder.findById(poId);
+        if (!purchaseOrder) {
+            return res.status(404).json({
+                success: false,
+                message: 'Purchase order not found'
+            });
+        }
+
+        const validCostTypes = ['transferCost', 'detailingInspectionCost', 'agentCommission', 'carRecoveryCost', 'otherCharges'];
+        if (!validCostTypes.includes(costType)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid cost type'
+            });
+        }
+
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: 'No file uploaded'
+            });
+        }
+
+        // Map cost type to investor assignment field in PurchaseOrder
+        const costTypeToInvestorField = {
+            'transferCost': 'transferCostInvestor',
+            'detailingInspectionCost': 'detailingInspectionCostInvestor',
+            'agentCommission': 'agentCommissionInvestor',
+            'carRecoveryCost': 'carRecoveryCostInvestor',
+            'otherCharges': 'otherChargesInvestor'
+        };
+
+        const investorField = costTypeToInvestorField[costType];
+        const responsibleInvestorId = purchaseOrder[investorField];
+
+        if (!responsibleInvestorId) {
+            return res.status(400).json({
+                success: false,
+                message: `No investor assigned for ${costType}. Please assign an investor first.`
+            });
+        }
+
+        // Find the invoice for this investor and purchase order
+        const invoice = await Invoice.findOne({
+            purchaseOrderId: poId,
+            investorId: responsibleInvestorId
+        });
+
+        if (!invoice) {
+            return res.status(404).json({
+                success: false,
+                message: 'Invoice not found for the assigned investor. Please ensure the invoice has been generated.'
+            });
+        }
+
+        // Delete existing evidence if any
+        const existingEvidence = invoice.costInvoiceEvidence?.[costType];
+        if (existingEvidence?.publicId) {
+            try {
+                const resourceType = existingEvidence.fileType === 'application/pdf' ? 'raw' : 'image';
+                await cloudinary.uploader.destroy(existingEvidence.publicId, { resource_type: resourceType });
+            } catch (cloudError) {
+                logger.error('Error deleting existing evidence from Cloudinary:', cloudError);
+            }
+        }
+
+        // Store new evidence in the invoice
+        if (!invoice.costInvoiceEvidence) {
+            invoice.costInvoiceEvidence = {};
+        }
+
+        invoice.costInvoiceEvidence[costType] = {
+            fileName: req.file.originalname,
+            fileType: req.file.mimetype,
+            fileSize: req.file.size,
+            url: req.file.path,
+            publicId: req.file.filename,
+            uploadedBy: req.userId,
+            uploadedByModel: req.userRole === 'admin' ? 'Admin' : 'Manager',
+            uploadedAt: new Date()
+        };
+
+        await invoice.save();
+
+        logger.info(`Invoice evidence uploaded for Invoice ${invoice.invoiceNo}, cost type: ${costType}, investor: ${responsibleInvestorId}`);
+
+        res.status(200).json({
+            success: true,
+            message: 'Invoice evidence uploaded successfully',
+            data: invoice
+        });
+    } catch (error) {
+        logger.error('Upload cost invoice evidence error:', error);
+        next(error);
+    }
+};
+
+/**
+ * @desc    Delete invoice evidence for PO cost field
+ * @route   DELETE /api/v1/purchases/po/:poId/cost-invoice-evidence/:costType
+ * @access  Private (Admin)
+ */
+exports.deleteCostInvoiceEvidence = async (req, res, next) => {
+    try {
+        const { poId, costType } = req.params;
+        const { cloudinary } = require('../cloudinary');
+        const Invoice = require('../models/Invoice');
+
+        const purchaseOrder = await PurchaseOrder.findById(poId);
+        if (!purchaseOrder) {
+            return res.status(404).json({
+                success: false,
+                message: 'Purchase order not found'
+            });
+        }
+
+        const validCostTypes = ['transferCost', 'detailingInspectionCost', 'agentCommission', 'carRecoveryCost', 'otherCharges'];
+        if (!validCostTypes.includes(costType)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid cost type'
+            });
+        }
+
+        // Map cost type to investor assignment field in PurchaseOrder
+        const costTypeToInvestorField = {
+            'transferCost': 'transferCostInvestor',
+            'detailingInspectionCost': 'detailingInspectionCostInvestor',
+            'agentCommission': 'agentCommissionInvestor',
+            'carRecoveryCost': 'carRecoveryCostInvestor',
+            'otherCharges': 'otherChargesInvestor'
+        };
+
+        const investorField = costTypeToInvestorField[costType];
+        const responsibleInvestorId = purchaseOrder[investorField];
+
+        if (!responsibleInvestorId) {
+            return res.status(400).json({
+                success: false,
+                message: `No investor assigned for ${costType}.`
+            });
+        }
+
+        // Find the invoice for this investor and purchase order
+        const invoice = await Invoice.findOne({
+            purchaseOrderId: poId,
+            investorId: responsibleInvestorId
+        });
+
+        if (!invoice) {
+            return res.status(404).json({
+                success: false,
+                message: 'Invoice not found for the assigned investor.'
+            });
+        }
+
+        const evidence = invoice.costInvoiceEvidence?.[costType];
+        if (!evidence) {
+            return res.status(404).json({
+                success: false,
+                message: 'Invoice evidence not found'
+            });
+        }
+
+        // Delete from Cloudinary
+        if (evidence.publicId) {
+            try {
+                const resourceType = evidence.fileType === 'application/pdf' ? 'raw' : 'image';
+                await cloudinary.uploader.destroy(evidence.publicId, { resource_type: resourceType });
+            } catch (cloudError) {
+                logger.error('Error deleting evidence from Cloudinary:', cloudError);
+            }
+        }
+
+        // Remove from database using $unset
+        await Invoice.updateOne(
+            { _id: invoice._id },
+            { $unset: { [`costInvoiceEvidence.${costType}`]: '' } }
+        );
+        
+        // Refresh the document
+        const updatedInvoice = await Invoice.findById(invoice._id);
+
+        logger.info(`Invoice evidence deleted for Invoice ${invoice.invoiceNo}, cost type: ${costType}`);
+
+        res.status(200).json({
+            success: true,
+            message: 'Invoice evidence deleted successfully',
+            data: updatedInvoice
+        });
+    } catch (error) {
+        logger.error('Delete cost invoice evidence error:', error);
         next(error);
     }
 };
