@@ -140,36 +140,56 @@ exports.sendDocuSignPO = async (req, res, next) => {
         }
 
         // Prepare investor data
-        const investorAllocations = po.investorAllocations.map(allocation => ({
-            investorName: allocation.investorId.name,
-            investorEmail: allocation.investorId.email,
+        const investorAllocations = po.investorAllocations.map((allocation) => ({
+            investorId: allocation.investorId?._id || allocation.investorId,
+            investorName: allocation.investorId?.name,
+            investorEmail: allocation.investorId?.email,
             amount: allocation.amount,
             percentage: allocation.percentage
         }));
 
-        // Create DocuSign envelope
-        const envelope = await docusignService.createPurchaseOrderEnvelope({
+        // Create DocuSign envelopes (one per investor)
+        const envelopes = await docusignService.createPurchaseOrderEnvelope({
             poId: po.poId,
             vehicleId: po.vehicleId?.vehicleId,
             investorAllocations,
             amount: po.amount
         });
 
-        // Update PO with envelope ID
-        po.docuSignEnvelopeId = envelope.envelopeId;
+        const envelopeStatus = (status) => (status || 'sent').toLowerCase();
+        const now = new Date();
+
+        po.docuSignEnvelopeId = envelopes[0]?.envelopeId || null;
         po.docuSignStatus = 'sent';
+        po.docuSignSentAt = now;
         po.status = 'pending_signature';
+        po.docuSignEnvelopes = envelopes.map((env) => ({
+            investorId: env.investorId,
+            investorName: env.investorName,
+            investorEmail: env.investorEmail,
+            envelopeId: env.envelopeId,
+            status: envelopeStatus(env.status),
+            sentAt: now
+        }));
+
+        po.investorAllocations = po.investorAllocations.map((allocation) => {
+            const match = envelopes.find((env) => String(env.investorId) === String(allocation.investorId));
+            if (match) {
+                allocation.docuSignEnvelopeId = match.envelopeId;
+                allocation.docuSignStatus = envelopeStatus(match.status);
+                allocation.docuSignSentAt = now;
+            }
+            return allocation;
+        });
+
         await po.save();
 
-        logger.info(`DocuSign envelope sent for PO ${po.poId}`);
+        logger.info(`DocuSign envelopes sent for PO ${po.poId}:`, envelopes.map(env => env.envelopeId));
 
         res.status(200).json({
             success: true,
-            message: 'DocuSign envelope sent to investors',
-            data: {
-                envelopeId: envelope.envelopeId,
-                status: envelope.status
-            }
+            message: 'DocuSign envelopes sent to investors',
+            data: envelopes
         });
     } catch (error) {
         logger.error('Send DocuSign PO error:', error);

@@ -121,7 +121,11 @@ router.put(
     authenticate,
     isAdmin,
     mongoIdValidation,
-    body('investorId').notEmpty().withMessage('Investor ID is required'),
+    body('investorAllocations')
+        .isArray()
+        .withMessage('Investor allocations must be an array')
+        .custom((value) => Array.isArray(value) && (value.length === 0 || value.every((item) => item && item.investorId && item.percentage !== undefined)))
+        .withMessage('Each investor allocation must include investorId and percentage'),
     validate,
     purchaseController.assignInvestorToLead
 );
@@ -236,6 +240,11 @@ router.put(
     body('agent_commision').optional({ values: 'falsy' }).isFloat({ min: 0 }),
     body('car_recovery_cost').optional({ values: 'falsy' }).isFloat({ min: 0 }),
     body('other_charges').optional({ values: 'falsy' }).isFloat({ min: 0 }),
+    body('transferCostInvestor').optional({ values: 'falsy' }).isMongoId().withMessage('transferCostInvestor must be a valid investor ID'),
+    body('detailingInspectionCostInvestor').optional({ values: 'falsy' }).isMongoId().withMessage('detailingInspectionCostInvestor must be a valid investor ID'),
+    body('agentCommissionInvestor').optional({ values: 'falsy' }).isMongoId().withMessage('agentCommissionInvestor must be a valid investor ID'),
+    body('carRecoveryCostInvestor').optional({ values: 'falsy' }).isMongoId().withMessage('carRecoveryCostInvestor must be a valid investor ID'),
+    body('otherChargesInvestor').optional({ values: 'falsy' }).isMongoId().withMessage('otherChargesInvestor must be a valid investor ID'),
     validate,
     purchaseController.upsertLeadPurchaseOrder
 );

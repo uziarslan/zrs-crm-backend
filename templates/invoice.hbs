@@ -26,6 +26,9 @@
     <div class="meta">Investor Name: <strong>{{investor_name}}</strong></div>
     <div class="meta">Prepared By: <strong>{{prepared_by}}</strong></div>
     <div class="meta">Reference PO No: <strong>{{reference_po_no}}</strong></div>
+  {{#if investment_percentage}}
+  <div class="meta">Investment Percentage: <strong>{{investment_percentage}}%</strong></div>
+  {{/if}}
   </div>
 
   <div class="section-title">Vehicle Details</div>
@@ -42,6 +45,8 @@
     <tr><td>Buying Price</td><td class="right">AED {{buying_price}}</td></tr>
     <tr><td>Transfer Cost (RTA)</td><td class="right">AED {{transfer_cost}}</td></tr>
     <tr><td>Detailing / Inspection Cost</td><td class="right">AED {{detailing_inspection_cost}}</td></tr>
+    <tr><td>Agent Commission (Optional)</td><td class="right">AED {{agent_commission}}</td></tr>
+    <tr><td>Car Recovery Cost (Optional)</td><td class="right">AED {{car_recovery_cost}}</td></tr>
     <tr><td>Other Charges (if any)</td><td class="right">AED {{other_charges}}</td></tr>
     <tr><th>Total Amount Payable</th><th class="right">AED {{total_amount_payable}}</th></tr>
   </table>

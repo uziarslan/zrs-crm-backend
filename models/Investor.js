@@ -30,6 +30,18 @@ const investorSchema = new mongoose.Schema({
         required: [true, 'Credit limit is required'],
         default: 0
     },
+    decidedPercentageMin: {
+        type: Number,
+        min: [0, 'Decided percentage cannot be negative'],
+        max: [100, 'Decided percentage cannot exceed 100'],
+        default: 0
+    },
+    decidedPercentageMax: {
+        type: Number,
+        min: [0, 'Decided percentage cannot be negative'],
+        max: [100, 'Decided percentage cannot exceed 100'],
+        default: 0
+    },
     utilizedAmount: {
         type: Number,
         default: 0

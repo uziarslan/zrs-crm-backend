@@ -130,6 +130,10 @@ class DocuSignService {
         try {
             const { poId, vehicleId, investorAllocations, amount } = poData;
 
+            if (!Array.isArray(investorAllocations) || investorAllocations.length === 0) {
+                throw new Error('No investor allocations provided for DocuSign PO.');
+            }
+
             // Get access token
             const accessToken = await this.getAccessToken();
             this.apiClient.addDefaultHeader('Authorization', `Bearer ${accessToken}`);
@@ -137,51 +141,68 @@ class DocuSignService {
             const envelopesApi = new docusign.EnvelopesApi(this.apiClient);
             const accountId = process.env.DOCUSIGN_ACCOUNT_ID;
 
-            // Create envelope definition
-            const envelope = new docusign.EnvelopeDefinition();
-            envelope.emailSubject = `Purchase Order ${poId} - ZRS Cars Trading`;
-            envelope.status = 'sent';
+            const results = [];
 
-            // Create document (in production, generate actual PDF)
-            const doc = new docusign.Document();
-            doc.documentBase64 = this.generatePODocumentBase64(poData);
-            doc.name = `PO_${poId}.pdf`;
-            doc.fileExtension = 'pdf';
-            doc.documentId = '1';
-            envelope.documents = [doc];
+            for (const allocation of investorAllocations) {
+                if (!allocation?.investorEmail) {
+                    logger.warn(`Skipping DocuSign PO for investor without email: ${allocation?.investorName || allocation?.investorId}`);
+                    continue;
+                }
 
-            // Add signers (investors)
-            const signers = [];
-            investorAllocations.forEach((allocation, index) => {
+                const safeName = (allocation.investorName || allocation.investorEmail || 'Investor').replace(/[^a-zA-Z0-9]+/g, '_');
+
+                // Create envelope definition for this investor
+                const envelope = new docusign.EnvelopeDefinition();
+                envelope.emailSubject = `Purchase Order ${poId} - ${allocation.investorName || 'Investor'}`;
+                envelope.status = 'sent';
+
+                // Create document (in production, generate actual PDF)
+                const doc = new docusign.Document();
+                doc.documentBase64 = this.generatePODocumentBase64({
+                    ...poData,
+                    amount: allocation.amount ?? amount,
+                    investorAllocations: [allocation]
+                });
+                doc.name = `PO_${poId}_${safeName}.pdf`;
+                doc.fileExtension = 'pdf';
+                doc.documentId = '1';
+                envelope.documents = [doc];
+
+                // Configure signer for this investor
                 const signer = new docusign.Signer();
                 signer.email = allocation.investorEmail;
-                signer.name = allocation.investorName;
-                signer.recipientId = String(index + 1);
-                signer.routingOrder = String(index + 1);
+                signer.name = allocation.investorName || allocation.investorEmail || 'Investor';
+                signer.recipientId = '1';
+                signer.routingOrder = '1';
 
-                // Add signature tab
                 const signHere = new docusign.SignHere();
                 signHere.documentId = '1';
                 signHere.pageNumber = '1';
                 signHere.xPosition = '100';
-                signHere.yPosition = String(200 + (index * 100));
+                signHere.yPosition = '200';
 
                 signer.tabs = { signHereTabs: [signHere] };
-                signers.push(signer);
-            });
+                envelope.recipients = { signers: [signer] };
 
-            envelope.recipients = { signers };
+                const result = await envelopesApi.createEnvelope(accountId, { envelopeDefinition: envelope });
 
-            // Create envelope
-            const result = await envelopesApi.createEnvelope(accountId, { envelopeDefinition: envelope });
+                logger.info(`DocuSign envelope created for PO ${poId} (Investor: ${allocation.investorName || allocation.investorEmail}): ${result.envelopeId}`);
 
-            logger.info(`DocuSign envelope created for PO ${poId}: ${result.envelopeId}`);
+                results.push({
+                    investorId: allocation.investorId,
+                    investorName: allocation.investorName,
+                    investorEmail: allocation.investorEmail,
+                    envelopeId: result.envelopeId,
+                    status: result.status,
+                    uri: result.uri
+                });
+            }
 
-            return {
-                envelopeId: result.envelopeId,
-                status: result.status,
-                uri: result.uri
-            };
+            if (results.length === 0) {
+                throw new Error('No valid investors to send DocuSign envelopes to.');
+            }
+
+            return results;
         } catch (error) {
             logger.error('DocuSign create PO envelope error:', error);
             throw new Error('Failed to create DocuSign envelope');
@@ -195,7 +216,11 @@ class DocuSignService {
      */
     async createLeadPurchaseAgreement(leadData) {
         try {
-            const { leadId, investor, priceAnalysis, vehicleInfo, contactInfo, purchaseOrder } = leadData;
+            const { leadId, investor, priceAnalysis, vehicleInfo, contactInfo, purchaseOrder, allocation } = leadData;
+
+            if (!investor || !investor.email) {
+                throw new Error('Investor email is required to send DocuSign purchase agreement');
+            }
 
             // Debug logging
             logger.info('DocuSign createLeadPurchaseAgreement called with:', {
@@ -203,7 +228,12 @@ class DocuSignService {
                 investor: investor ? { name: investor.name, email: investor.email, _id: investor._id } : null,
                 hasPriceAnalysis: !!priceAnalysis,
                 hasVehicleInfo: !!vehicleInfo,
-                hasContactInfo: !!contactInfo
+                hasContactInfo: !!contactInfo,
+                allocation: allocation ? {
+                    investorId: allocation.investorId,
+                    percentage: allocation.percentage,
+                    amount: allocation.amount
+                } : null
             });
 
             // Get access token
@@ -280,7 +310,11 @@ class DocuSignService {
                     { tabLabel: 'transfer_cost_rta', value: fmt(purchaseOrder?.transferCost) },
 
                     // Date
-                    { tabLabel: 'date', value: fmt(new Date().toLocaleDateString()) }
+                    { tabLabel: 'date', value: fmt(new Date().toLocaleDateString()) },
+
+                    // Allocation Specific (optional tabs in template)
+                    { tabLabel: 'investor_allocation_percentage', value: fmt(allocation?.percentage) },
+                    { tabLabel: 'investor_allocation_amount', value: fmt(allocation?.amount) }
                 ]
             };
 

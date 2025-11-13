@@ -87,7 +87,11 @@ async function resetAndSeed() {
                     { adminId: admin._id, groupName: 'Operations', approvedAt: new Date() }
                 ]
             },
-            investor: investor._id,
+            investorAllocations: [{
+                investorId: investor._id,
+                percentage: 100,
+                amount: 58000
+            }],
             attachments: [
                 {
                     category: 'inspectionReport',

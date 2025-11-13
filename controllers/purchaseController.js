@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Lead = require('../models/Lead');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Invoice = require('../models/Invoice');
@@ -8,7 +9,8 @@ const Invoice = require('../models/Invoice');
  */
 exports.upsertLeadPurchaseOrder = async (req, res, next) => {
     try {
-        const lead = await Lead.findById(req.params.id);
+        const lead = await Lead.findById(req.params.id)
+            .populate('investorAllocations.investorId', 'name email');
         if (!lead) {
             return res.status(404).json({ success: false, message: 'Lead not found' });
         }
@@ -16,15 +18,33 @@ exports.upsertLeadPurchaseOrder = async (req, res, next) => {
         // Upsert draft PO keyed by leadId
         let purchaseOrder = await PurchaseOrder.findOne({ leadId: lead._id });
         if (!purchaseOrder) {
+            const allocations = Array.isArray(lead.investorAllocations)
+                ? lead.investorAllocations
+                : [];
+
+            const baseAmount = Number(
+                lead.priceAnalysis?.purchasedFinalPrice ||
+                lead.priceAnalysis?.maxSellingPrice ||
+                0
+            );
+
+            const normalizedAllocations = allocations.map((allocation) => {
+                const percentage = Number(allocation.percentage || 0);
+                const amount = allocation.amount != null && allocation.amount !== ''
+                    ? Number(allocation.amount)
+                    : Number(((percentage / 100) * baseAmount).toFixed(2));
+                return {
+                    investorId: allocation.investorId || allocation.investorId?._id || allocation,
+                    percentage,
+                    amount
+                };
+            }).filter(a => a.investorId);
+
             purchaseOrder = await PurchaseOrder.create({
                 leadId: lead._id,
-                investorId: lead.investor,
-                amount: lead.priceAnalysis?.purchasedFinalPrice || lead.priceAnalysis?.maxSellingPrice || 0,
-                investorAllocations: [{
-                    investorId: lead.investor,
-                    amount: lead.priceAnalysis?.purchasedFinalPrice || lead.priceAnalysis?.maxSellingPrice || 0,
-                    percentage: 100
-                }],
+                investorId: normalizedAllocations[0]?.investorId || null,
+                amount: baseAmount,
+                investorAllocations: normalizedAllocations,
                 status: 'draft',
                 notes: `Purchase Order for lead ${lead.leadId}`,
                 createdBy: req.userId,
@@ -38,14 +58,57 @@ exports.upsertLeadPurchaseOrder = async (req, res, next) => {
             detailing_inspection_cost,
             agent_commision,
             car_recovery_cost,
-            other_charges
+            other_charges,
+            transferCostInvestor,
+            detailingInspectionCostInvestor,
+            agentCommissionInvestor,
+            carRecoveryCostInvestor,
+            otherChargesInvestor
         } = req.body;
+
+        const allowedInvestorIds = new Set(
+            (lead.investorAllocations || [])
+                .map((allocation) => {
+                    const id = allocation?.investorId?._id || allocation?.investorId;
+                    return id ? id.toString() : null;
+                })
+                .filter(Boolean)
+        );
+
+        const makeValidationError = (message) => {
+            const error = new Error(message);
+            error.statusCode = 400;
+            return error;
+        };
+
+        const normalizeAssignment = (value, label) => {
+            if (value == null || value === '') {
+                return null;
+            }
+
+            const stringValue = value.toString();
+            if (!mongoose.Types.ObjectId.isValid(stringValue)) {
+                throw makeValidationError(`${label} must be a valid investor ID.`);
+            }
+
+            if (!allowedInvestorIds.has(stringValue)) {
+                throw makeValidationError(`${label} must reference an investor assigned to this lead.`);
+            }
+
+            return stringValue;
+        };
 
         purchaseOrder.transferCost = Number(transferCost);
         purchaseOrder.detailing_inspection_cost = Number(detailing_inspection_cost);
         if (agent_commision != null && agent_commision !== '') purchaseOrder.agent_commision = Number(agent_commision);
         if (car_recovery_cost != null && car_recovery_cost !== '') purchaseOrder.car_recovery_cost = Number(car_recovery_cost);
         if (other_charges != null && other_charges !== '') purchaseOrder.other_charges = Number(other_charges);
+
+        purchaseOrder.transferCostInvestor = normalizeAssignment(transferCostInvestor, 'Transfer cost investor');
+        purchaseOrder.detailingInspectionCostInvestor = normalizeAssignment(detailingInspectionCostInvestor, 'Detailing / inspection cost investor');
+        purchaseOrder.agentCommissionInvestor = normalizeAssignment(agentCommissionInvestor, 'Agent commission investor');
+        purchaseOrder.carRecoveryCostInvestor = normalizeAssignment(carRecoveryCostInvestor, 'Car recovery cost investor');
+        purchaseOrder.otherChargesInvestor = normalizeAssignment(otherChargesInvestor, 'Other charges investor');
 
         // Auto-calculate total investment: buying price + all costs
         const buyingPrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
@@ -80,6 +143,9 @@ exports.upsertLeadPurchaseOrder = async (req, res, next) => {
 
         res.status(200).json({ success: true, message: 'Purchase Order saved', data: purchaseOrder });
     } catch (error) {
+        if (error.statusCode) {
+            return res.status(error.statusCode).json({ success: false, message: error.message });
+        }
         next(error);
     }
 };
@@ -231,7 +297,7 @@ exports.getLeadById = async (req, res, next) => {
                 }
             })
             .populate('invoice')
-            .populate('investor', 'name email');
+            .populate('investorAllocations.investorId', 'name email decidedPercentageMin decidedPercentageMax creditLimit utilizedAmount');
 
         if (!lead) {
             return res.status(404).json({
@@ -295,7 +361,11 @@ exports.updateLeadStatus = async (req, res, next) => {
     try {
         const { status, notes } = req.body;
 
-        const lead = await Lead.findById(req.params.id);
+        const lead = await Lead.findById(req.params.id)
+            .populate({
+                path: 'investorAllocations.investorId',
+                select: 'name email decidingPercentageMin decidingPercentageMax creditLimit utilizedAmount status'
+            });
 
         if (!lead) {
             return res.status(404).json({
@@ -599,8 +669,8 @@ exports.approvePurchaseOrder = async (req, res, next) => {
 exports.getVehicleById = async (req, res, next) => {
     try {
         const lead = await Lead.findById(req.params.id)
-            .populate('investor', 'name email')
             .populate('createdBy', 'name email')
+            .populate('investorAllocations.investorId', 'name email')
             .populate({
                 path: 'purchaseOrder',
                 populate: {
@@ -626,6 +696,19 @@ exports.getVehicleById = async (req, res, next) => {
             }));
         }
 
+        const allocationSource = (lead.purchaseOrder?.investorAllocations && lead.purchaseOrder.investorAllocations.length > 0)
+            ? lead.purchaseOrder.investorAllocations
+            : lead.investorAllocations || [];
+        const primaryAllocation = allocationSource?.[0];
+        const primaryInvestorDoc = primaryAllocation?.investorId;
+        const investorSummary = primaryInvestorDoc
+            ? {
+                _id: primaryInvestorDoc._id || primaryInvestorDoc,
+                name: primaryInvestorDoc.name,
+                email: primaryInvestorDoc.email
+            }
+            : null;
+
         // Transform to match expected format
         const vehicle = {
             _id: lead._id,
@@ -646,7 +729,7 @@ exports.getVehicleById = async (req, res, next) => {
             maxSellingPrice: lead.priceAnalysis?.maxSellingPrice,
             attachments: lead.attachments || [],
             contactInfo: lead.contactInfo || {},
-            investor: lead.investor,
+            investor: investorSummary,
             investorAllocation: lead.purchaseOrder?.investorAllocations || [],
             purchaseOrder: lead.purchaseOrder,
             invoice: lead.invoice,
@@ -695,35 +778,48 @@ exports.getInventory = async (req, res, next) => {
         }
 
         const inventory = await Lead.find(query)
-            .populate('investor', 'name email')
+            .populate('investorAllocations.investorId', 'name email')
             .populate('createdBy', 'name email')
             .sort({ createdAt: -1 });
 
         // Transform leads to match expected format
-        const transformedInventory = inventory.map(lead => ({
-            _id: lead._id,
-            leadId: lead.leadId,
-            vehicleId: lead.leadId, // Use leadId as vehicleId for compatibility
-            make: lead.vehicleInfo?.make,
-            model: lead.vehicleInfo?.model,
-            year: lead.vehicleInfo?.year,
-            mileage: lead.vehicleInfo?.mileage,
-            color: lead.vehicleInfo?.color,
-            trim: lead.vehicleInfo?.trim,
-            region: lead.vehicleInfo?.region,
-            vin: lead.vehicleInfo?.vin,
-            status: lead.status,
-            purchasePrice: lead.priceAnalysis?.purchasedFinalPrice,
-            askingPrice: lead.vehicleInfo?.askingPrice,
-            minSellingPrice: lead.priceAnalysis?.minSellingPrice,
-            maxSellingPrice: lead.priceAnalysis?.maxSellingPrice,
-            attachments: lead.attachments || [],
-            operationalChecklist: lead.operationalChecklist || {},
-            investor: lead.investor,
-            createdBy: lead.createdBy,
-            createdAt: lead.createdAt,
-            updatedAt: lead.updatedAt
-        }));
+        const transformedInventory = inventory.map(lead => {
+            const allocationSource = Array.isArray(lead.investorAllocations) ? lead.investorAllocations : [];
+            const primaryAllocation = allocationSource[0];
+            const investorDoc = primaryAllocation?.investorId;
+            const investorSummary = investorDoc
+                ? {
+                    _id: investorDoc._id || investorDoc,
+                    name: investorDoc.name,
+                    email: investorDoc.email
+                }
+                : null;
+
+            return {
+                _id: lead._id,
+                leadId: lead.leadId,
+                vehicleId: lead.leadId, // Use leadId as vehicleId for compatibility
+                make: lead.vehicleInfo?.make,
+                model: lead.vehicleInfo?.model,
+                year: lead.vehicleInfo?.year,
+                mileage: lead.vehicleInfo?.mileage,
+                color: lead.vehicleInfo?.color,
+                trim: lead.vehicleInfo?.trim,
+                region: lead.vehicleInfo?.region,
+                vin: lead.vehicleInfo?.vin,
+                status: lead.status,
+                purchasePrice: lead.priceAnalysis?.purchasedFinalPrice,
+                askingPrice: lead.vehicleInfo?.askingPrice,
+                minSellingPrice: lead.priceAnalysis?.minSellingPrice,
+                maxSellingPrice: lead.priceAnalysis?.maxSellingPrice,
+                attachments: lead.attachments || [],
+                operationalChecklist: lead.operationalChecklist || {},
+                investor: investorSummary,
+                createdBy: lead.createdBy,
+                createdAt: lead.createdAt,
+                updatedAt: lead.updatedAt
+            };
+        });
 
         res.status(200).json({
             success: true,
@@ -846,6 +942,143 @@ const updateInvestorSOA = async (investorId, vehicle, allocation) => {
         logger.error('Error updating investor SOA:', error);
     }
 };
+
+function normalizeLeadAllocations(lead, options = {}) {
+    const purchasePrice = options.purchasePrice != null
+        ? Number(options.purchasePrice)
+        : Number(lead?.priceAnalysis?.purchasedFinalPrice || 0);
+
+    const allocations = Array.isArray(lead?.investorAllocations)
+        ? lead.investorAllocations
+        : [];
+
+    return allocations.map((allocation) => {
+        const investorId = allocation?.investorId?._id || allocation?.investorId;
+        if (!investorId) {
+            return null;
+        }
+
+        const investorDoc = allocation?.investorId && allocation.investorId._id
+            ? allocation.investorId
+            : (allocation.investor || null);
+        const investorPlain = investorDoc
+            ? (typeof investorDoc.toObject === 'function' ? investorDoc.toObject() : { ...investorDoc })
+            : null;
+
+        let percentage = Number(allocation?.percentage);
+        const hasValidPercentage = !Number.isNaN(percentage) && percentage > 0;
+
+        if (!hasValidPercentage && allocation?.amount != null && allocation.amount !== '' && purchasePrice > 0) {
+            percentage = Number(((Number(allocation.amount) / purchasePrice) * 100).toFixed(2));
+        }
+
+        if (Number.isNaN(percentage)) {
+            percentage = 0;
+        }
+
+        let amount = 0;
+        if (allocation?.amount != null && allocation.amount !== '') {
+            amount = Number(allocation.amount);
+        } else if (purchasePrice > 0 && percentage > 0) {
+            amount = Number(((percentage / 100) * purchasePrice).toFixed(2));
+        }
+
+        return {
+            investorId,
+            investor: investorPlain || undefined,
+            name: investorPlain?.name,
+            email: investorPlain?.email,
+            percentage,
+            amount
+        };
+    }).filter(Boolean);
+}
+
+const roundToCurrency = (value) => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) {
+        return 0;
+    }
+    return Math.round((num + Number.EPSILON) * 100) / 100;
+};
+
+function computeInvestorInvoiceShare(allocation, totals) {
+    const {
+        totalPayable,
+        buyingPrice,
+        charges = {},
+        costAssignments = {},
+        baseAmountTotal,
+        basePercentageTotal,
+        allocationCount
+    } = totals;
+
+    const investorRawId = allocation?.investorId?._id || allocation?.investorId;
+    const investorKey = investorRawId ? investorRawId.toString() : null;
+
+    const allocationAmount = Number(allocation?.amount) || 0;
+    const allocationPercentage = Number(allocation?.percentage) || 0;
+
+    let ratio = null;
+    if (baseAmountTotal && allocationAmount > 0) {
+        ratio = allocationAmount / baseAmountTotal;
+    }
+    if ((ratio == null || !Number.isFinite(ratio) || ratio <= 0) && basePercentageTotal > 0 && allocationPercentage > 0) {
+        ratio = allocationPercentage / basePercentageTotal;
+    }
+    if (ratio == null || !Number.isFinite(ratio) || ratio <= 0) {
+        const count = allocationCount || 1;
+        ratio = 1 / count;
+    }
+
+    const shareFromPool = (value) => {
+        const numeric = Number(value) || 0;
+        if (numeric <= 0) {
+            return 0;
+        }
+        return roundToCurrency(numeric * ratio);
+    };
+
+    const computeChargeShare = (key) => {
+        const total = Number(charges[key]) || 0;
+        if (total <= 0) {
+            return 0;
+        }
+        const assignedInvestor = costAssignments[key];
+        if (assignedInvestor && investorKey) {
+            return assignedInvestor === investorKey ? roundToCurrency(total) : 0;
+        }
+        return shareFromPool(total);
+    };
+
+    const breakdown = {
+        buyingPrice: shareFromPool(buyingPrice),
+        transferCost: computeChargeShare('transferCost'),
+        detailingInspectionCost: computeChargeShare('detailingInspectionCost'),
+        agentCommission: computeChargeShare('agentCommission'),
+        carRecoveryCost: computeChargeShare('carRecoveryCost'),
+        otherCharges: computeChargeShare('otherCharges')
+    };
+
+    const computedTotal = roundToCurrency(
+        breakdown.buyingPrice +
+        breakdown.transferCost +
+        breakdown.detailingInspectionCost +
+        breakdown.agentCommission +
+        breakdown.carRecoveryCost +
+        breakdown.otherCharges
+    );
+
+    const derivedPercentage = totalPayable > 0
+        ? roundToCurrency((computedTotal / totalPayable) * 100)
+        : allocationPercentage;
+
+    return {
+        amount: computedTotal,
+        percentage: allocationPercentage > 0 ? allocationPercentage : derivedPercentage,
+        breakdown
+    };
+}
 
 // Helper function to update recent investments
 const updateRecentInvestments = async (investorId, vehicle, allocation) => {
@@ -1720,7 +1953,7 @@ exports.declineLeadApproval = async (req, res, next) => {
 exports.convertLeadToVehicle = async (req, res, next) => {
     try {
         const lead = await Lead.findById(req.params.id)
-            .populate('investor')
+            .populate('investorAllocations.investorId', 'name email')
             .populate('createdBy');
 
         if (!lead) {
@@ -1751,27 +1984,112 @@ exports.convertLeadToVehicle = async (req, res, next) => {
             });
         }
 
-        // Update investor utilization and portfolio (post-purchase)
-        // Get investor ID (handles both populated and non-populated)
-        const investorId = lead.investor?._id || lead.investor;
+        const normalizedAllocations = normalizeLeadAllocations(lead);
 
-        if (investorId && lead.priceAnalysis?.purchasedFinalPrice) {
-            try {
-                await Investor.findByIdAndUpdate(investorId, {
-                    $inc: { utilizedAmount: lead.priceAnalysis.purchasedFinalPrice },
-                    $push: {
-                        investments: {
-                            leadId: lead._id,
-                            amount: lead.priceAnalysis.purchasedFinalPrice,
-                            percentage: 100,
-                            date: new Date(),
-                            status: 'active'
+        if (normalizedAllocations.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'No investors assigned to this lead. Cannot convert to vehicle.'
+            });
+        }
+
+        const defaultModeOfPayment = req.body.modeOfPayment || '';
+        const defaultPaymentReceivedBy = req.body.paymentReceivedBy || '';
+        const investorPaymentsInput = Array.isArray(req.body.investorPayments) ? req.body.investorPayments : [];
+        const investorPaymentsMap = new Map();
+        for (const entry of investorPaymentsInput) {
+            if (!entry?.investorId) continue;
+            investorPaymentsMap.set(entry.investorId.toString(), {
+                modeOfPayment: entry.modeOfPayment || '',
+                paymentReceivedBy: entry.paymentReceivedBy || ''
+            });
+        }
+
+        const missingPaymentInvestor = normalizedAllocations.find((allocation) => {
+            const investorKey = allocation?.investorId?._id
+                ? allocation.investorId._id.toString()
+                : allocation?.investorId?.toString();
+            const override = investorKey ? investorPaymentsMap.get(investorKey) : null;
+            const modeOfPayment = override?.modeOfPayment || defaultModeOfPayment;
+            const paymentReceivedBy = override?.paymentReceivedBy || defaultPaymentReceivedBy;
+            return !(modeOfPayment && paymentReceivedBy);
+        });
+
+        if (missingPaymentInvestor) {
+            const investorName = missingPaymentInvestor?.name || missingPaymentInvestor?.email || 'Investor';
+            return res.status(400).json({
+                success: false,
+                message: `Mode of payment and payment receiver are required for ${investorName}.`
+            });
+        }
+
+        const invoiceDate = new Date();
+        const buyingPrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
+        const transferCost = Number(purchaseOrder.transferCost || 0);
+        const detailingInspectionCost = Number(purchaseOrder.detailing_inspection_cost || 0);
+        const agentCommission = Number(purchaseOrder.agent_commision || 0);
+        const carRecoveryCost = Number(purchaseOrder.car_recovery_cost || 0);
+        const otherCharges = Number(purchaseOrder.other_charges || 0);
+        const totalPayable = buyingPrice + transferCost + detailingInspectionCost + agentCommission + carRecoveryCost + otherCharges;
+        const allocationSharesByInvestor = new Map();
+        const baseAmountTotal = normalizedAllocations.reduce((sum, allocation) => {
+            const value = Number(allocation?.amount) || 0;
+            return sum + (Number.isFinite(value) && value > 0 ? value : 0);
+        }, 0);
+        const basePercentageTotal = normalizedAllocations.reduce((sum, allocation) => {
+            const value = Number(allocation?.percentage) || 0;
+            return sum + (Number.isFinite(value) && value > 0 ? value : 0);
+        }, 0);
+        const costAssignments = {
+            transferCost: purchaseOrder.transferCostInvestor ? purchaseOrder.transferCostInvestor.toString() : null,
+            detailingInspectionCost: purchaseOrder.detailingInspectionCostInvestor ? purchaseOrder.detailingInspectionCostInvestor.toString() : null,
+            agentCommission: purchaseOrder.agentCommissionInvestor ? purchaseOrder.agentCommissionInvestor.toString() : null,
+            carRecoveryCost: purchaseOrder.carRecoveryCostInvestor ? purchaseOrder.carRecoveryCostInvestor.toString() : null,
+            otherCharges: purchaseOrder.otherChargesInvestor ? purchaseOrder.otherChargesInvestor.toString() : null
+        };
+        const shareContext = {
+            totalPayable,
+            buyingPrice,
+            charges: {
+                transferCost,
+                detailingInspectionCost,
+                agentCommission,
+                carRecoveryCost,
+                otherCharges
+            },
+            costAssignments,
+            baseAmountTotal,
+            basePercentageTotal,
+            allocationCount: normalizedAllocations.length
+        };
+
+        // Update investor utilization and portfolio (post-purchase) using shared totals
+        if (lead.priceAnalysis?.purchasedFinalPrice || totalPayable > 0) {
+            for (const allocation of normalizedAllocations) {
+                const investorKey = allocation?.investorId?._id
+                    ? allocation.investorId._id.toString()
+                    : allocation?.investorId?.toString();
+                const shareInfo = computeInvestorInvoiceShare(allocation, shareContext);
+                if (investorKey) {
+                    allocationSharesByInvestor.set(investorKey, shareInfo);
+                }
+                try {
+                    await Investor.findByIdAndUpdate(allocation.investorId, {
+                        $inc: { utilizedAmount: shareInfo.amount },
+                        $push: {
+                            investments: {
+                                leadId: lead._id,
+                                amount: shareInfo.amount,
+                                percentage: shareInfo.percentage || allocation.percentage || 0,
+                                date: new Date(),
+                                status: 'active'
+                            }
                         }
-                    }
-                });
-                logger.info(`Successfully updated investor ${investorId} utilization and investments`);
-            } catch (invErr) {
-                logger.error('Failed to update investor utilization on purchase:', invErr);
+                    });
+                    logger.info(`Successfully updated investor ${allocation.investorId} utilization by AED ${shareInfo.amount}`);
+                } catch (invErr) {
+                    logger.error('Failed to update investor utilization on purchase:', invErr);
+                }
             }
         }
 
@@ -1786,146 +2104,174 @@ exports.convertLeadToVehicle = async (req, res, next) => {
         logger.info(`Lead ${lead.leadId} moved to inventory and Purchase Order ${purchaseOrder.poId} completed`);
 
         // Generate and send invoice
-        const invoiceDate = new Date();
-        const buyingPrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
-        const transferCost = Number(purchaseOrder.transferCost || 0);
-        const detailingInspectionCost = Number(purchaseOrder.detailing_inspection_cost || 0);
-        const agentCommission = Number(purchaseOrder.agent_commision || 0);
-        const carRecoveryCost = Number(purchaseOrder.car_recovery_cost || 0);
-        const otherCharges = Number(purchaseOrder.other_charges || 0);
-        const totalPayable = buyingPrice + transferCost + detailingInspectionCost + agentCommission + carRecoveryCost + otherCharges;
 
-        // Create and save invoice record (status: sent)
         const Invoice = require('../models/Invoice');
-        const invoice = await Invoice.create({
-            leadId: lead._id,
-            purchaseOrderId: purchaseOrder._id,
-            investorId: lead.investor?._id || lead.investor,
-            preparedBy: purchaseOrder.prepared_by || req.user?.name || req.user?.email,
-            totals: {
-                buying_price: buyingPrice,
-                transfer_cost_rta: transferCost,
-                detailing_inspection_cost: detailingInspectionCost,
-                agent_commission: agentCommission,
-                car_recovery_cost: carRecoveryCost,
-                other_charges: otherCharges,
-                total_amount_payable: totalPayable
-            },
-            vehicle: {
-                make: lead.vehicleInfo?.make || '',
-                model: lead.vehicleInfo?.model || '',
-                trim: lead.vehicleInfo?.trim || '',
-                year: lead.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
-                vin: lead.vehicleInfo?.vin || ''
-            },
-            status: 'sent',
-            sentAt: new Date()
-        });
-
-        // Prepare data for invoice PDF generation
-        const invoiceData = {
-            invoiceNo: invoice.invoiceNo,
-            date: invoiceDate.toLocaleDateString('en-GB'),
-            investorName: lead.investor?.name || 'Investor',
-            preparedBy: purchaseOrder.prepared_by || req.user?.name || req.user?.email || 'Admin',
-            referencePoNo: purchaseOrder.poId,
-            carMake: lead.vehicleInfo?.make || '',
-            carModel: lead.vehicleInfo?.model || '',
-            trim: lead.vehicleInfo?.trim || '',
-            yearModel: lead.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
-            chassisNo: lead.vehicleInfo?.vin || '',
-            region: lead.vehicleInfo?.region || '',
-            buyingPrice: buyingPrice,
-            transferCost: transferCost,
-            detailingInspectionCost: detailingInspectionCost,
-            otherCharges: otherCharges,
-            totalAmountPayable: totalPayable,
-            // Payment (from request body or defaults)
-            modeOfPayment: req.body.modeOfPayment || 'Bank Transfer / Cash / Cheque',
-            paymentReceivedBy: req.body.paymentReceivedBy || 'Authorized Person',
-            dateOfPayment: invoiceDate.toLocaleDateString('en-GB')
-        };
-
-        const investorEmail = lead.investor?.email;
-        if (investorEmail) {
-            try {
-                // Generate HTML -> PDF via Puppeteer
-                const { generateInvoicePdfBuffer } = require('../services/invoicePdfService');
-                const pdfBuffer = await generateInvoicePdfBuffer({
-                    invoice_no: invoiceData.invoiceNo,
-                    date: invoiceData.date,
-                    investor_name: invoiceData.investorName,
-                    prepared_by: invoiceData.preparedBy,
-                    reference_po_no: invoiceData.referencePoNo,
-                    car_make: invoiceData.carMake,
-                    car_model: invoiceData.carModel,
-                    trim: invoiceData.trim,
-                    year_model: invoiceData.yearModel,
-                    chassis_no: invoiceData.chassisNo,
-                    buying_price: buyingPrice,
-                    transfer_cost: transferCost,
-                    detailing_inspection_cost: detailingInspectionCost,
-                    agent_commission: agentCommission,
-                    car_recovery_cost: carRecoveryCost,
-                    other_charges: otherCharges,
-                    total_amount_payable: totalPayable,
-                    mode_of_payment: invoiceData.modeOfPayment,
-                    payment_received_by: invoiceData.paymentReceivedBy,
-                    date_of_payment: invoiceData.dateOfPayment
-                });
-
-                // Store base64 content directly on invoice
-                const pdfBase64 = pdfBuffer.toString('base64');
-                invoice.content = pdfBase64;
-                invoice.mimeType = 'application/pdf';
-                invoice.fileSize = pdfBuffer.length;
-                invoice.filePublicId = undefined;
-                await invoice.save();
-
-                // Store invoice reference in the lead
-                lead.invoice = invoice._id;
-                await lead.save();
-
-                // Email investor via Mailtrap API
-                const { sendMailtrapEmail } = require('../services/mailtrapService');
-                await sendMailtrapEmail({
-                    recipients: [investorEmail],
-                    templateUuid: process.env.PURCHASE_ORDER_INVOICE_ID || undefined,
-                    templateVariables: {
-                        investor_name: invoiceData.investorName,
-                        po_number: invoiceData.referencePoNo,
-                        issue_date: invoiceData.date,
-                        total_amount: `AED ${totalPayable.toLocaleString()}`,
-                        year: invoiceData.yearModel || ''
-                    },
-                    attachments: [{
-                        filename: `Invoice_${invoice.invoiceNo}.pdf`,
-                        content: pdfBase64,
-                        type: 'application/pdf',
-                        disposition: 'attachment'
-                    }]
-                });
-
-                logger.info(`Invoice ${invoice.invoiceNo} generated and emailed to investor`);
-            } catch (invoiceErr) {
-                logger.error('Failed to generate and send invoice:', invoiceErr);
-                // Continue even if invoice fails - don't block the purchase
+        const createdInvoices = [];
+        for (const allocation of normalizedAllocations) {
+            const investorDoc = allocation.investor || await Investor.findById(allocation.investorId).select('name email');
+            if (!investorDoc) {
+                logger.warn(`Investor ${allocation.investorId} not found while creating invoice`);
+                continue;
             }
+
+            const investorKey = allocation?.investorId?._id
+                ? allocation.investorId._id.toString()
+                : allocation?.investorId?.toString();
+            const shareInfo = investorKey && allocationSharesByInvestor.has(investorKey)
+                ? allocationSharesByInvestor.get(investorKey)
+                : computeInvestorInvoiceShare(allocation, shareContext);
+            const paymentOverride = investorKey ? investorPaymentsMap.get(investorKey) : null;
+            const modeOfPaymentValue = paymentOverride?.modeOfPayment || defaultModeOfPayment || 'Bank Transfer / Cash / Cheque';
+            const paymentReceivedByValue = paymentOverride?.paymentReceivedBy || defaultPaymentReceivedBy || 'Authorized Person';
+            const breakdown = shareInfo.breakdown;
+
+            const invoice = await Invoice.create({
+                leadId: lead._id,
+                purchaseOrderId: purchaseOrder._id,
+                investorId: allocation.investorId,
+                preparedBy: purchaseOrder.prepared_by || req.user?.name || req.user?.email,
+                totals: {
+                    buying_price: breakdown.buyingPrice,
+                    transfer_cost_rta: breakdown.transferCost,
+                    detailing_inspection_cost: breakdown.detailingInspectionCost,
+                    agent_commission: breakdown.agentCommission,
+                    car_recovery_cost: breakdown.carRecoveryCost,
+                    other_charges: breakdown.otherCharges,
+                    total_amount_payable: shareInfo.amount
+                },
+                vehicle: {
+                    make: lead.vehicleInfo?.make || '',
+                    model: lead.vehicleInfo?.model || '',
+                    trim: lead.vehicleInfo?.trim || '',
+                    year: lead.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
+                    vin: lead.vehicleInfo?.vin || ''
+                },
+                status: 'sent',
+                sentAt: new Date()
+            });
+
+            const invoiceData = {
+                invoiceNo: invoice.invoiceNo,
+                date: invoiceDate.toLocaleDateString('en-GB'),
+                investorName: investorDoc.name || 'Investor',
+                preparedBy: purchaseOrder.prepared_by || req.user?.name || req.user?.email || 'Admin',
+                referencePoNo: purchaseOrder.poId,
+                carMake: lead.vehicleInfo?.make || '',
+                carModel: lead.vehicleInfo?.model || '',
+                trim: lead.vehicleInfo?.trim || '',
+                yearModel: lead.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
+                chassisNo: lead.vehicleInfo?.vin || '',
+                region: lead.vehicleInfo?.region || '',
+                buyingPrice: breakdown.buyingPrice,
+                transferCost: breakdown.transferCost,
+                detailingInspectionCost: breakdown.detailingInspectionCost,
+                agentCommission: breakdown.agentCommission,
+                carRecoveryCost: breakdown.carRecoveryCost,
+                otherCharges: breakdown.otherCharges,
+                totalAmountPayable: shareInfo.amount,
+                investmentPercentage: shareInfo.percentage,
+                modeOfPayment: modeOfPaymentValue,
+                paymentReceivedBy: paymentReceivedByValue,
+                dateOfPayment: invoiceDate.toLocaleDateString('en-GB')
+            };
+
+            if (investorDoc.email) {
+                try {
+                    const { generateInvoicePdfBuffer } = require('../services/invoicePdfService');
+                    const pdfBuffer = await generateInvoicePdfBuffer({
+                        invoice_no: invoiceData.invoiceNo,
+                        date: invoiceData.date,
+                        investor_name: invoiceData.investorName,
+                        prepared_by: invoiceData.preparedBy,
+                        reference_po_no: invoiceData.referencePoNo,
+                        car_make: invoiceData.carMake,
+                        car_model: invoiceData.carModel,
+                        trim: invoiceData.trim,
+                        year_model: invoiceData.yearModel,
+                        chassis_no: invoiceData.chassisNo,
+                        buying_price: breakdown.buyingPrice,
+                        transfer_cost: breakdown.transferCost,
+                        detailing_inspection_cost: breakdown.detailingInspectionCost,
+                        agent_commission: breakdown.agentCommission,
+                        car_recovery_cost: breakdown.carRecoveryCost,
+                        other_charges: breakdown.otherCharges,
+                        total_amount_payable: shareInfo.amount,
+                        investment_percentage: invoiceData.investmentPercentage != null
+                            ? Number(invoiceData.investmentPercentage).toFixed(2)
+                            : '',
+                        mode_of_payment: modeOfPaymentValue,
+                        payment_received_by: paymentReceivedByValue,
+                        date_of_payment: invoiceData.dateOfPayment
+                    });
+
+                    const pdfBase64 = pdfBuffer.toString('base64');
+                    invoice.content = pdfBase64;
+                    invoice.mimeType = 'application/pdf';
+                    invoice.fileSize = pdfBuffer.length;
+                    invoice.filePublicId = undefined;
+                    await invoice.save();
+
+                    const { sendMailtrapEmail } = require('../services/mailtrapService');
+                    await sendMailtrapEmail({
+                        recipients: [investorDoc.email],
+                        templateUuid: process.env.PURCHASE_ORDER_INVOICE_ID || undefined,
+                        templateVariables: {
+                            investor_name: invoiceData.investorName,
+                            po_number: invoiceData.referencePoNo,
+                            issue_date: invoiceData.date,
+                            total_amount: `AED ${shareInfo.amount.toLocaleString()}`,
+                            year: invoiceData.yearModel || ''
+                        },
+                        attachments: [{
+                            filename: `Invoice_${invoice.invoiceNo}.pdf`,
+                            content: pdfBase64,
+                            type: 'application/pdf',
+                            disposition: 'attachment'
+                        }]
+                    });
+
+                    logger.info(`Invoice ${invoice.invoiceNo} generated and emailed to ${investorDoc.email}`);
+                } catch (invoiceErr) {
+                    logger.error('Failed to generate and send invoice:', invoiceErr);
+                }
+            }
+
+            createdInvoices.push(invoice);
+        }
+
+        if (createdInvoices.length > 0) {
+            lead.invoice = createdInvoices[0]._id;
+            await lead.save();
         }
 
         // Audit log
+        const investorLogDetails = normalizedAllocations.map((allocation) => ({
+            id: allocation.investorId,
+            name: allocation.name,
+            percentage: allocation.percentage,
+            amount: (() => {
+                const investorKey = allocation?.investorId?._id
+                    ? allocation.investorId._id.toString()
+                    : allocation?.investorId?.toString();
+                const shareInfo = investorKey && allocationSharesByInvestor.has(investorKey)
+                    ? allocationSharesByInvestor.get(investorKey)
+                    : computeInvestorInvoiceShare(allocation, shareContext);
+                return shareInfo.amount;
+            })()
+        }));
+
         await logLead(req, 'lead_moved_to_inventory',
             `Lead ${lead.leadId} moved to inventory`,
             lead, {
             leadId: lead.leadId,
             purchasePrice: lead.priceAnalysis?.purchasedFinalPrice,
-            investor: lead.investor?.name
+            investors: investorLogDetails
         });
 
         await logPurchaseOrder(req, 'po_completed', `Purchase Order ${purchaseOrder.poId} completed for lead ${lead.leadId}`, purchaseOrder, {
             vehicle: `${lead.vehicleInfo?.make} ${lead.vehicleInfo?.model} ${lead.vehicleInfo?.year}`,
             amount: purchaseOrder.amount,
-            investor: lead.investor?.name
+            investors: investorLogDetails
         });
 
         res.status(200).json({
@@ -1939,10 +2285,14 @@ exports.convertLeadToVehicle = async (req, res, next) => {
                     status: purchaseOrder.status,
                     amount: purchaseOrder.amount
                 },
-                invoice: invoice ? {
-                    invoiceNo: invoice.invoiceNo,
-                    sent: !!investorEmail
-                } : null
+                invoice: createdInvoices[0] ? {
+                    invoiceNo: createdInvoices[0].invoiceNo,
+                    sent: true
+                } : null,
+                invoices: createdInvoices.map((invoiceEntry) => ({
+                    invoiceNo: invoiceEntry.invoiceNo,
+                    investorId: invoiceEntry.investorId
+                }))
             }
         });
     } catch (error) {
@@ -1971,7 +2321,7 @@ exports.bulkConvertLeadsToVehicles = async (req, res, next) => {
         const errors = [];
 
         for (const leadData of leads) {
-            const { leadId, modeOfPayment, paymentReceivedBy } = leadData;
+            const { leadId, modeOfPayment, paymentReceivedBy, investorPayments } = leadData;
 
             if (!leadId) {
                 errors.push({ leadId: leadId || 'unknown', error: 'Lead ID is required' });
@@ -1980,11 +2330,44 @@ exports.bulkConvertLeadsToVehicles = async (req, res, next) => {
 
             try {
                 const lead = await Lead.findById(leadId)
-                    .populate('investor')
+                    .populate('investorAllocations.investorId', 'name email')
                     .populate('createdBy');
 
                 if (!lead) {
                     errors.push({ leadId, error: 'Lead not found' });
+                    continue;
+                }
+
+                const normalizedAllocations = normalizeLeadAllocations(lead);
+                if (normalizedAllocations.length === 0) {
+                    errors.push({ leadId, error: 'No investors assigned to this lead' });
+                    continue;
+                }
+
+                const defaultModeOfPayment = modeOfPayment || '';
+                const defaultPaymentReceivedBy = paymentReceivedBy || '';
+                const investorPaymentsInput = Array.isArray(investorPayments) ? investorPayments : [];
+                const investorPaymentsMap = new Map();
+                for (const entry of investorPaymentsInput) {
+                    if (!entry?.investorId) continue;
+                    investorPaymentsMap.set(entry.investorId.toString(), {
+                        modeOfPayment: entry.modeOfPayment || '',
+                        paymentReceivedBy: entry.paymentReceivedBy || ''
+                    });
+                }
+
+                const missingPaymentInvestor = normalizedAllocations.find((allocation) => {
+                    const investorKey = allocation?.investorId?._id
+                        ? allocation.investorId._id.toString()
+                        : allocation?.investorId?.toString();
+                    const override = investorKey ? investorPaymentsMap.get(investorKey) : null;
+                    const modeValue = override?.modeOfPayment || defaultModeOfPayment;
+                    const receivedByValue = override?.paymentReceivedBy || defaultPaymentReceivedBy;
+                    return !(modeValue && receivedByValue);
+                });
+                if (missingPaymentInvestor) {
+                    const investorName = missingPaymentInvestor?.name || missingPaymentInvestor?.email || 'Investor';
+                    errors.push({ leadId, error: `Mode of payment and payment receiver are required for ${investorName}` });
                     continue;
                 }
 
@@ -2004,22 +2387,70 @@ exports.bulkConvertLeadsToVehicles = async (req, res, next) => {
                     continue;
                 }
 
+                const invoiceDate = new Date();
+                const buyingPrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
+                const transferCost = Number(purchaseOrder.transferCost || 0);
+                const detailingInspectionCost = Number(purchaseOrder.detailing_inspection_cost || 0);
+                const agentCommission = Number(purchaseOrder.agent_commision || 0);
+                const carRecoveryCost = Number(purchaseOrder.car_recovery_cost || 0);
+                const otherCharges = Number(purchaseOrder.other_charges || 0);
+                const totalPayable = buyingPrice + transferCost + detailingInspectionCost + agentCommission + carRecoveryCost + otherCharges;
+                const allocationSharesByInvestor = new Map();
+                const baseAmountTotal = normalizedAllocations.reduce((sum, allocation) => {
+                    const value = Number(allocation?.amount) || 0;
+                    return sum + (Number.isFinite(value) && value > 0 ? value : 0);
+                }, 0);
+                const basePercentageTotal = normalizedAllocations.reduce((sum, allocation) => {
+                    const value = Number(allocation?.percentage) || 0;
+                    return sum + (Number.isFinite(value) && value > 0 ? value : 0);
+                }, 0);
+                const costAssignments = {
+                    transferCost: purchaseOrder.transferCostInvestor ? purchaseOrder.transferCostInvestor.toString() : null,
+                    detailingInspectionCost: purchaseOrder.detailingInspectionCostInvestor ? purchaseOrder.detailingInspectionCostInvestor.toString() : null,
+                    agentCommission: purchaseOrder.agentCommissionInvestor ? purchaseOrder.agentCommissionInvestor.toString() : null,
+                    carRecoveryCost: purchaseOrder.carRecoveryCostInvestor ? purchaseOrder.carRecoveryCostInvestor.toString() : null,
+                    otherCharges: purchaseOrder.otherChargesInvestor ? purchaseOrder.otherChargesInvestor.toString() : null
+                };
+                const shareContext = {
+                    totalPayable,
+                    buyingPrice,
+                    charges: {
+                        transferCost,
+                        detailingInspectionCost,
+                        agentCommission,
+                        carRecoveryCost,
+                        otherCharges
+                    },
+                    costAssignments,
+                    baseAmountTotal,
+                    basePercentageTotal,
+                    allocationCount: normalizedAllocations.length
+                };
+
                 // Update investor utilization
-                const investorId = lead.investor?._id || lead.investor;
-                if (investorId && lead.priceAnalysis?.purchasedFinalPrice) {
+                if (lead.priceAnalysis?.purchasedFinalPrice || totalPayable > 0) {
                     try {
-                        await Investor.findByIdAndUpdate(investorId, {
-                            $inc: { utilizedAmount: lead.priceAnalysis.purchasedFinalPrice },
-                            $push: {
-                                investments: {
-                                    leadId: lead._id,
-                                    amount: lead.priceAnalysis.purchasedFinalPrice,
-                                    percentage: 100,
-                                    date: new Date(),
-                                    status: 'active'
-                                }
+                        for (const allocation of normalizedAllocations) {
+                            const investorKey = allocation?.investorId?._id
+                                ? allocation.investorId._id.toString()
+                                : allocation?.investorId?.toString();
+                            const shareInfo = computeInvestorInvoiceShare(allocation, shareContext);
+                            if (investorKey) {
+                                allocationSharesByInvestor.set(investorKey, shareInfo);
                             }
-                        });
+                            await Investor.findByIdAndUpdate(allocation.investorId, {
+                                $inc: { utilizedAmount: shareInfo.amount },
+                                $push: {
+                                    investments: {
+                                        leadId: lead._id,
+                                        amount: shareInfo.amount,
+                                        percentage: shareInfo.percentage || allocation.percentage || 0,
+                                        date: new Date(),
+                                        status: 'active'
+                                    }
+                                }
+                            });
+                        }
                     } catch (invErr) {
                         logger.error(`Failed to update investor utilization for lead ${leadId}:`, invErr);
                     }
@@ -2034,126 +2465,154 @@ exports.bulkConvertLeadsToVehicles = async (req, res, next) => {
                 await lead.save();
 
                 // Generate and send invoice
-                const invoiceDate = new Date();
-                const buyingPrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
-                const transferCost = Number(purchaseOrder.transferCost || 0);
-                const detailingInspectionCost = Number(purchaseOrder.detailing_inspection_cost || 0);
-                const agentCommission = Number(purchaseOrder.agent_commision || 0);
-                const carRecoveryCost = Number(purchaseOrder.car_recovery_cost || 0);
-                const otherCharges = Number(purchaseOrder.other_charges || 0);
-                const totalPayable = buyingPrice + transferCost + detailingInspectionCost + agentCommission + carRecoveryCost + otherCharges;
 
-                const invoice = await Invoice.create({
-                    leadId: lead._id,
-                    purchaseOrderId: purchaseOrder._id,
-                    investorId: lead.investor?._id || lead.investor,
-                    preparedBy: purchaseOrder.prepared_by || req.user?.name || req.user?.email,
-                    totals: {
-                        buying_price: buyingPrice,
-                        transfer_cost_rta: transferCost,
-                        detailing_inspection_cost: detailingInspectionCost,
-                        agent_commission: agentCommission,
-                        car_recovery_cost: carRecoveryCost,
-                        other_charges: otherCharges,
-                        total_amount_payable: totalPayable
-                    },
-                    vehicle: {
-                        make: lead.vehicleInfo?.make || '',
-                        model: lead.vehicleInfo?.model || '',
-                        trim: lead.vehicleInfo?.trim || '',
-                        year: lead.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
-                        vin: lead.vehicleInfo?.vin || ''
-                    },
-                    status: 'sent',
-                    sentAt: new Date()
-                });
-
-                const invoiceData = {
-                    invoiceNo: invoice.invoiceNo,
-                    date: invoiceDate.toLocaleDateString('en-GB'),
-                    investorName: lead.investor?.name || 'Investor',
-                    preparedBy: purchaseOrder.prepared_by || req.user?.name || req.user?.email || 'Admin',
-                    referencePoNo: purchaseOrder.poId,
-                    carMake: lead.vehicleInfo?.make || '',
-                    carModel: lead.vehicleInfo?.model || '',
-                    trim: lead.vehicleInfo?.trim || '',
-                    yearModel: lead.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
-                    chassisNo: lead.vehicleInfo?.vin || '',
-                    region: lead.vehicleInfo?.region || '',
-                    buyingPrice: buyingPrice,
-                    transferCost: transferCost,
-                    detailingInspectionCost: detailingInspectionCost,
-                    otherCharges: otherCharges,
-                    totalAmountPayable: totalPayable,
-                    modeOfPayment: modeOfPayment || 'Bank Transfer / Cash / Cheque',
-                    paymentReceivedBy: paymentReceivedBy || 'Authorized Person',
-                    dateOfPayment: invoiceDate.toLocaleDateString('en-GB')
-                };
-
-                const investorEmail = lead.investor?.email;
-                if (investorEmail) {
-                    try {
-                        const { generateInvoicePdfBuffer } = require('../services/invoicePdfService');
-                        const pdfBuffer = await generateInvoicePdfBuffer({
-                            invoice_no: invoiceData.invoiceNo,
-                            date: invoiceData.date,
-                            investor_name: invoiceData.investorName,
-                            prepared_by: invoiceData.preparedBy,
-                            reference_po_no: invoiceData.referencePoNo,
-                            car_make: invoiceData.carMake,
-                            car_model: invoiceData.carModel,
-                            trim: invoiceData.trim,
-                            year_model: invoiceData.yearModel,
-                            chassis_no: invoiceData.chassisNo,
-                            buying_price: buyingPrice,
-                            transfer_cost: transferCost,
-                            detailing_inspection_cost: detailingInspectionCost,
-                            agent_commission: agentCommission,
-                            car_recovery_cost: carRecoveryCost,
-                            other_charges: otherCharges,
-                            total_amount_payable: totalPayable,
-                            mode_of_payment: invoiceData.modeOfPayment,
-                            payment_received_by: invoiceData.paymentReceivedBy,
-                            date_of_payment: invoiceData.dateOfPayment
-                        });
-
-                        const pdfBase64 = pdfBuffer.toString('base64');
-                        invoice.content = pdfBase64;
-                        invoice.mimeType = 'application/pdf';
-                        invoice.fileSize = pdfBuffer.length;
-                        invoice.filePublicId = undefined;
-                        await invoice.save();
-
-                        lead.invoice = invoice._id;
-                        await lead.save();
-
-                        const { sendMailtrapEmail } = require('../services/mailtrapService');
-                        await sendMailtrapEmail({
-                            recipients: [investorEmail],
-                            templateUuid: process.env.PURCHASE_ORDER_INVOICE_ID || undefined,
-                            templateVariables: {
-                                investor_name: invoiceData.investorName,
-                                po_number: invoiceData.referencePoNo,
-                                issue_date: invoiceData.date,
-                                total_amount: `AED ${totalPayable.toLocaleString()}`,
-                                year: invoiceData.yearModel || ''
-                            },
-                            attachments: [{
-                                filename: `Invoice_${invoice.invoiceNo}.pdf`,
-                                content: pdfBase64,
-                                type: 'application/pdf',
-                                disposition: 'attachment'
-                            }]
-                        });
-                    } catch (invoiceErr) {
-                        logger.error(`Failed to generate invoice for lead ${leadId}:`, invoiceErr);
+                const Invoice = require('../models/Invoice');
+                const createdInvoices = [];
+                for (const allocation of normalizedAllocations) {
+                    const investorDoc = allocation.investor || await Investor.findById(allocation.investorId).select('name email');
+                    if (!investorDoc) {
+                        logger.warn(`Investor ${allocation.investorId} not found while creating invoice`);
+                        continue;
                     }
+
+                    const investorKey = allocation?.investorId?._id
+                        ? allocation.investorId._id.toString()
+                        : allocation?.investorId?.toString();
+                    const shareInfo = investorKey && allocationSharesByInvestor.has(investorKey)
+                        ? allocationSharesByInvestor.get(investorKey)
+                        : computeInvestorInvoiceShare(allocation, shareContext);
+                    const paymentOverride = investorKey ? investorPaymentsMap.get(investorKey) : null;
+                    const modeOfPaymentValue = paymentOverride?.modeOfPayment || defaultModeOfPayment || 'Bank Transfer / Cash / Cheque';
+                    const paymentReceivedByValue = paymentOverride?.paymentReceivedBy || defaultPaymentReceivedBy || 'Authorized Person';
+                    const breakdown = shareInfo.breakdown;
+
+                    const invoice = await Invoice.create({
+                        leadId: lead._id,
+                        purchaseOrderId: purchaseOrder._id,
+                        investorId: allocation.investorId,
+                        preparedBy: purchaseOrder.prepared_by || req.user?.name || req.user?.email,
+                        totals: {
+                            buying_price: breakdown.buyingPrice,
+                            transfer_cost_rta: breakdown.transferCost,
+                            detailing_inspection_cost: breakdown.detailingInspectionCost,
+                            agent_commission: breakdown.agentCommission,
+                            car_recovery_cost: breakdown.carRecoveryCost,
+                            other_charges: breakdown.otherCharges,
+                            total_amount_payable: shareInfo.amount
+                        },
+                        vehicle: {
+                            make: lead.vehicleInfo?.make || '',
+                            model: lead.vehicleInfo?.model || '',
+                            trim: lead.vehicleInfo?.trim || '',
+                            year: lead.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
+                            vin: lead.vehicleInfo?.vin || ''
+                        },
+                        status: 'sent',
+                        sentAt: new Date()
+                    });
+
+                    const invoiceData = {
+                        invoiceNo: invoice.invoiceNo,
+                        date: invoiceDate.toLocaleDateString('en-GB'),
+                        investorName: investorDoc.name || 'Investor',
+                        preparedBy: purchaseOrder.prepared_by || req.user?.name || req.user?.email || 'Admin',
+                        referencePoNo: purchaseOrder.poId,
+                        carMake: lead.vehicleInfo?.make || '',
+                        carModel: lead.vehicleInfo?.model || '',
+                        trim: lead.vehicleInfo?.trim || '',
+                        yearModel: lead.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
+                        chassisNo: lead.vehicleInfo?.vin || '',
+                        region: lead.vehicleInfo?.region || '',
+                        buyingPrice: breakdown.buyingPrice,
+                        transferCost: breakdown.transferCost,
+                        detailingInspectionCost: breakdown.detailingInspectionCost,
+                        agentCommission: breakdown.agentCommission,
+                        carRecoveryCost: breakdown.carRecoveryCost,
+                        otherCharges: breakdown.otherCharges,
+                        totalAmountPayable: shareInfo.amount,
+                        investmentPercentage: shareInfo.percentage,
+                            modeOfPayment: modeOfPaymentValue,
+                            paymentReceivedBy: paymentReceivedByValue,
+                        dateOfPayment: invoiceDate.toLocaleDateString('en-GB')
+                    };
+
+                    if (investorDoc.email) {
+                        try {
+                            const { generateInvoicePdfBuffer } = require('../services/invoicePdfService');
+                            const pdfBuffer = await generateInvoicePdfBuffer({
+                                invoice_no: invoiceData.invoiceNo,
+                                date: invoiceData.date,
+                                investor_name: invoiceData.investorName,
+                                prepared_by: invoiceData.preparedBy,
+                                reference_po_no: invoiceData.referencePoNo,
+                                car_make: invoiceData.carMake,
+                                car_model: invoiceData.carModel,
+                                trim: invoiceData.trim,
+                                year_model: invoiceData.yearModel,
+                                chassis_no: invoiceData.chassisNo,
+                            buying_price: breakdown.buyingPrice,
+                            transfer_cost: breakdown.transferCost,
+                            detailing_inspection_cost: breakdown.detailingInspectionCost,
+                            agent_commission: breakdown.agentCommission,
+                            car_recovery_cost: breakdown.carRecoveryCost,
+                            other_charges: breakdown.otherCharges,
+                            total_amount_payable: shareInfo.amount,
+                            investment_percentage: invoiceData.investmentPercentage != null
+                                ? Number(invoiceData.investmentPercentage).toFixed(2)
+                                    : '',
+                                mode_of_payment: modeOfPaymentValue,
+                                payment_received_by: paymentReceivedByValue,
+                                date_of_payment: invoiceData.dateOfPayment
+                            });
+
+                            const pdfBase64 = pdfBuffer.toString('base64');
+                            invoice.content = pdfBase64;
+                            invoice.mimeType = 'application/pdf';
+                            invoice.fileSize = pdfBuffer.length;
+                            invoice.filePublicId = undefined;
+                            await invoice.save();
+
+                            const { sendMailtrapEmail } = require('../services/mailtrapService');
+                            await sendMailtrapEmail({
+                                recipients: [investorDoc.email],
+                                templateUuid: process.env.PURCHASE_ORDER_INVOICE_ID || undefined,
+                                templateVariables: {
+                                    investor_name: invoiceData.investorName,
+                                    po_number: invoiceData.referencePoNo,
+                                    issue_date: invoiceData.date,
+                                    total_amount: `AED ${shareInfo.amount.toLocaleString()}`,
+                                    year: invoiceData.yearModel || ''
+                                },
+                                attachments: [{
+                                    filename: `Invoice_${invoice.invoiceNo}.pdf`,
+                                    content: pdfBase64,
+                                    type: 'application/pdf',
+                                    disposition: 'attachment'
+                                }]
+                            });
+                        } catch (invoiceErr) {
+                            logger.error(`Failed to generate invoice for lead ${leadId}:`, invoiceErr);
+                        }
+                    }
+
+                    createdInvoices.push({
+                        invoice,
+                        investorId: allocation.investorId
+                    });
+                }
+
+                if (createdInvoices.length > 0) {
+                    lead.invoice = createdInvoices[0].invoice._id;
+                    await lead.save();
                 }
 
                 results.push({
                     leadId: lead.leadId,
                     success: true,
-                    invoiceNo: invoice.invoiceNo
+                    invoices: createdInvoices.map(entry => ({
+                        invoiceNo: entry.invoice.invoiceNo,
+                        investorId: entry.investorId
+                    }))
                 });
             } catch (err) {
                 logger.error(`Error processing lead ${leadId}:`, err);
@@ -2221,7 +2680,7 @@ module.exports = exports;
  */
 exports.listInvestors = async (req, res, next) => {
     try {
-        const investors = await Investor.find({ status: 'active' }).select('name email creditLimit utilizedAmount');
+        const investors = await Investor.find({ status: 'active' }).select('name email creditLimit utilizedAmount decidedPercentageMin decidedPercentageMax');
         // Add remaining credit calculation
         const investorsWithCredit = investors.map(inv => ({
             ...inv.toObject(),
@@ -2240,23 +2699,138 @@ exports.listInvestors = async (req, res, next) => {
  */
 exports.assignInvestorToLead = async (req, res, next) => {
     try {
-        const { investorId } = req.body;
+        const { investorAllocations } = req.body;
         const lead = await Lead.findById(req.params.id);
         if (!lead) return res.status(404).json({ success: false, message: 'Lead not found' });
 
-        if (!investorId) return res.status(400).json({ success: false, message: 'Investor ID required' });
-        const investor = await Investor.findById(investorId).select('name email');
-        if (!investor) return res.status(404).json({ success: false, message: 'Investor not found' });
+        if (!Array.isArray(investorAllocations) || investorAllocations.length === 0) {
+            lead.investorAllocations = [];
+            await lead.save();
 
-        lead.investor = investorId;
-        await lead.save();
+            await logLead(req, 'lead_investors_cleared', `Cleared investors for lead ${lead.leadId}`, lead);
 
-        await logLead(req, 'lead_investor_assigned', `Assigned investor ${investor.name} to lead ${lead.leadId}`, lead, {
-            investor: { id: investor._id, name: investor.name, email: investor.email }
+            return res.status(200).json({ success: true, message: 'Investors cleared', data: lead });
+        }
+
+        const investorIds = investorAllocations.map(a => a.investorId);
+        const uniqueInvestorIds = [...new Set(investorIds.map(id => id?.toString()))];
+
+        if (uniqueInvestorIds.length !== investorAllocations.length) {
+            return res.status(400).json({
+                success: false,
+                message: 'Duplicate investors are not allowed in allocations'
+            });
+        }
+
+        const investors = await Investor.find({ _id: { $in: uniqueInvestorIds } })
+            .select('name email status decidedPercentageMin decidedPercentageMax creditLimit utilizedAmount');
+
+        if (investors.length !== investorAllocations.length) {
+            return res.status(404).json({
+                success: false,
+                message: 'One or more investors were not found'
+            });
+        }
+
+        const investorsById = new Map(investors.map(inv => [inv._id.toString(), inv]));
+        const purchasePrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
+        let totalPercentage = 0;
+
+        const normalizedAllocations = investorAllocations.map((allocation) => {
+            const investorId = allocation.investorId?.toString();
+            const investor = investorsById.get(investorId);
+            if (!investor) {
+                throw new Error(`Investor not found: ${investorId}`);
+            }
+
+            if (investor.status !== 'active') {
+                throw new Error(`Investor ${investor.name} is not active`);
+            }
+
+            const percentage = Number(allocation.percentage);
+            if (Number.isNaN(percentage) || percentage <= 0) {
+                throw new Error(`Allocation percentage must be greater than 0 for investor ${investor.name}`);
+            }
+
+            const minAllowed = investor.decidedPercentageMin ?? 0;
+            const maxAllowed = investor.decidedPercentageMax ?? 100;
+
+            if (percentage < minAllowed || percentage > maxAllowed) {
+                throw new Error(
+                    `Allocation percentage for ${investor.name} must be between ${minAllowed}% and ${maxAllowed}%`
+                );
+            }
+
+            totalPercentage += percentage;
+
+            let amount = 0;
+            if (allocation.amount != null && allocation.amount !== '') {
+                amount = Number(allocation.amount);
+                if (Number.isNaN(amount) || amount < 0) {
+                    throw new Error(`Allocation amount must be a non-negative number for investor ${investor.name}`);
+                }
+            } else if (purchasePrice > 0) {
+                amount = Number(((percentage / 100) * purchasePrice).toFixed(2));
+            }
+
+            return {
+                investorId: investor._id,
+                percentage,
+                amount,
+                name: investor.name,
+                email: investor.email
+            };
         });
 
-        res.status(200).json({ success: true, message: 'Investor assigned', data: lead });
+        if (totalPercentage > 100.0001) {
+            return res.status(400).json({
+                success: false,
+                message: 'Total allocation percentage cannot exceed 100%'
+            });
+        }
+
+        lead.investorAllocations = normalizedAllocations.map(({ investorId, percentage, amount }) => ({
+            investorId,
+            percentage,
+            amount
+        }));
+        await lead.save();
+
+        // Update associated purchase order allocations if draft exists
+        if (lead.purchaseOrder) {
+            const purchaseOrder = await PurchaseOrder.findById(lead.purchaseOrder);
+            if (purchaseOrder) {
+                purchaseOrder.investorId = normalizedAllocations[0]?.investorId || null;
+                purchaseOrder.investorAllocations = normalizedAllocations.map(({ investorId, percentage, amount }) => ({
+                    investorId,
+                    percentage,
+                    amount: amount || Number(((percentage / 100) * (purchaseOrder.amount || purchasePrice || 0)).toFixed(2))
+                }));
+                await purchaseOrder.save();
+            }
+        }
+
+        await logLead(
+            req,
+            'lead_investors_assigned',
+            `Assigned ${normalizedAllocations.length} investor(s) to lead ${lead.leadId}`,
+            lead,
+            {
+                investors: normalizedAllocations.map(({ investorId, percentage, amount, name, email }) => ({
+                    id: investorId,
+                    name,
+                    email,
+                    percentage,
+                    amount
+                }))
+            }
+        );
+
+        res.status(200).json({ success: true, message: 'Investors assigned', data: lead });
     } catch (error) {
+        if (error.message?.startsWith('Allocation') || error.message?.startsWith('Investor')) {
+            return res.status(400).json({ success: false, message: error.message });
+        }
         next(error);
     }
 };
@@ -2287,8 +2861,8 @@ exports.submitLeadForApproval = async (req, res, next) => {
         }
 
         // Validate investor assigned
-        if (!lead.investor) {
-            return res.status(400).json({ success: false, message: 'Investor not assigned' });
+        if (!Array.isArray(lead.investorAllocations) || lead.investorAllocations.length === 0) {
+            return res.status(400).json({ success: false, message: 'Investor allocation is required before submission' });
         }
 
         // Determine admin's group and auto-approve on submit
@@ -2326,7 +2900,7 @@ exports.submitLeadForApproval = async (req, res, next) => {
         await lead.save();
 
         await logLead(req, 'lead_submitted_for_approval', `Lead ${lead.leadId} submitted for dual approval (${lead.approval.approvals.length}/2)`, lead, {
-            investor: lead.investor,
+            investorAllocations: lead.investorAllocations,
             documents: { hasRegistrationCard, hasCarPictures, hasOnlineHistoryCheck },
             priceAnalysisComplete: true,
             groupsCovered: Array.from(groupsCovered),
@@ -2381,102 +2955,139 @@ exports.approveLead = async (req, res, next) => {
             // Mark approval achieved but DO NOT change lead.status (stays 'inspection')
             lead.approval.status = 'approved';
 
-            // Create PurchaseOrder and send DocuSign envelope when dual approved
-            try {
-                const investor = await Investor.findById(lead.investor).select('name email');
-                if (investor) {
-                    // Ensure a draft PurchaseOrder exists (created earlier via upsert) or create now
-                    let purchaseOrder = await PurchaseOrder.findOne({ leadId: lead._id });
-                    if (!purchaseOrder) {
-                        purchaseOrder = await PurchaseOrder.create({
-                            leadId: lead._id,
-                            investorId: lead.investor,
-                            amount: lead.priceAnalysis.purchasedFinalPrice || lead.priceAnalysis.maxSellingPrice,
-                            investorAllocations: [{
-                                investorId: lead.investor,
-                                amount: lead.priceAnalysis.purchasedFinalPrice || lead.priceAnalysis.maxSellingPrice,
-                                percentage: 100
-                            }],
-                            status: 'draft',
-                            notes: `Purchase Order for lead ${lead.leadId}`,
-                            createdBy: req.userId,
-                            createdByModel: 'Admin'
+            await lead.populate({
+                path: 'investorAllocations.investorId',
+                select: 'name email decidingPercentageMin decidingPercentageMax creditLimit utilizedAmount status'
+            });
+
+            const normalizedAllocations = normalizeLeadAllocations(lead);
+            logger.info('DocuSign approval flow - normalized allocations:', normalizedAllocations);
+
+            if (normalizedAllocations.length === 0) {
+                logger.warn(`Lead ${lead.leadId} approved but has no investor allocations; skipping DocuSign`);
+            } else {
+                const userRole = req.userRole || 'admin';
+                const userId = req.userId;
+
+                // Ensure a Purchase Order exists and is aligned with allocations
+                let purchaseOrder = await PurchaseOrder.findOne({ leadId: lead._id });
+                if (!purchaseOrder) {
+                    purchaseOrder = await PurchaseOrder.create({
+                        leadId: lead._id,
+                        investorId: normalizedAllocations[0].investorId || null,
+                        amount: lead.priceAnalysis.purchasedFinalPrice || lead.priceAnalysis.maxSellingPrice,
+                        investorAllocations: normalizedAllocations.map(({ investorId, percentage, amount }) => ({
+                            investorId,
+                            amount,
+                            percentage
+                        })),
+                        status: 'draft',
+                        notes: `Purchase Order for lead ${lead.leadId}`,
+                        createdBy: userId,
+                        createdByModel: userRole === 'admin' ? 'Admin' : 'Manager'
+                    });
+                } else {
+                    purchaseOrder.investorId = normalizedAllocations[0].investorId || null;
+                    purchaseOrder.investorAllocations = normalizedAllocations.map(({ investorId, percentage, amount }) => ({
+                        investorId,
+                        amount,
+                        percentage
+                    }));
+                    await purchaseOrder.save();
+                }
+
+                lead.purchaseOrder = purchaseOrder._id;
+                const poFields = lead.poFields || {};
+                if (!poFields.purchase_order_no) poFields.purchase_order_no = purchaseOrder.poId;
+                if (!poFields.date) poFields.date = new Date().toLocaleDateString();
+                if (!poFields.eid_passport) poFields.eid_passport = lead.contactInfo?.passportOrEmiratesId || '';
+                if (!poFields.car_make) poFields.car_make = lead.vehicleInfo?.make || '';
+                if (!poFields.car_model) poFields.car_model = lead.vehicleInfo?.model || '';
+                if (!poFields.car_trim) poFields.car_trim = lead.vehicleInfo?.trim || '';
+                if (!poFields.car_color) poFields.car_color = lead.vehicleInfo?.color || '';
+                if (!poFields.car_region) poFields.car_region = lead.vehicleInfo?.region || '';
+                if (!poFields.car_mileage && lead.vehicleInfo?.mileage != null) poFields.car_mileage = lead.vehicleInfo.mileage;
+                if (!poFields.car_chassis) poFields.car_chassis = lead.vehicleInfo?.vin || '';
+                if (!poFields.car_yaer) poFields.car_yaer = String(lead.vehicleInfo?.year || '');
+                if (!poFields.buying_price && lead.priceAnalysis?.purchasedFinalPrice != null) poFields.buying_price = lead.priceAnalysis.purchasedFinalPrice;
+                lead.poFields = poFields;
+                await lead.save();
+
+                const now = new Date();
+                const docuSignResults = [];
+                const docuSignErrors = [];
+
+                for (const allocation of normalizedAllocations) {
+                    logger.info('DocuSign approval flow - processing allocation:', allocation);
+                    try {
+                        const investor = allocation.investor || await Investor.findById(allocation.investorId)
+                            .select('name email decidingPercentageMin decidingPercentageMax creditLimit utilizedAmount');
+                        logger.info('DocuSign approval flow - resolved investor:', {
+                            allocationInvestorId: allocation.investorId,
+                            investor
+                        });
+                        if (!investor || !investor.email) {
+                            logger.warn(`Skipping DocuSign for allocation ${allocation.investorId} on lead ${lead.leadId}: missing investor email`);
+                            docuSignErrors.push({
+                                investorId: allocation.investorId,
+                                reason: 'missing_email'
+                            });
+                            continue;
+                        }
+
+                        const envelope = await docusignService.createLeadPurchaseAgreement({
+                            leadId: lead.leadId,
+                            investor,
+                            priceAnalysis: lead.priceAnalysis,
+                            vehicleInfo: lead.vehicleInfo,
+                            contactInfo: lead.contactInfo,
+                            purchaseOrder,
+                            allocation
+                        });
+
+                        docuSignResults.push({
+                            investorId: allocation.investorId,
+                            investorName: investor.name,
+                            investorEmail: investor.email,
+                            envelopeId: envelope.envelopeId,
+                            status: (envelope.status || 'sent').toLowerCase(),
+                            sentAt: now
+                        });
+                    } catch (docuSignError) {
+                        logger.error(`Failed to send DocuSign envelope for lead ${lead.leadId} allocation ${allocation.investorId}:`, docuSignError);
+                        docuSignErrors.push({
+                            investorId: allocation.investorId,
+                            reason: docuSignError.message
                         });
                     }
+                }
 
-                    // Link PurchaseOrder to lead
-                    lead.purchaseOrder = purchaseOrder._id;
-
-                    const leadData = {
-                        leadId: lead.leadId,
-                        investor: investor,
-                        priceAnalysis: lead.priceAnalysis,
-                        vehicleInfo: lead.vehicleInfo,
-                        contactInfo: lead.contactInfo
-                    };
-
-                    logger.info('DocuSign controller - calling service with:', {
-                        leadId: leadData.leadId,
-                        investor: leadData.investor ? { name: leadData.investor.name, email: leadData.investor.email, _id: leadData.investor._id } : null,
-                        hasPriceAnalysis: !!leadData.priceAnalysis,
-                        hasVehicleInfo: !!leadData.vehicleInfo,
-                        hasContactInfo: !!leadData.contactInfo,
-                        priceAnalysisKeys: leadData.priceAnalysis ? Object.keys(leadData.priceAnalysis) : [],
-                        vehicleInfoKeys: leadData.vehicleInfo ? Object.keys(leadData.vehicleInfo) : [],
-                        contactInfoKeys: leadData.contactInfo ? Object.keys(leadData.contactInfo) : []
-                    });
-
-                    // Ensure PO fields
-                    const poFields = lead.poFields || {};
-                    // Default some fields if not provided
-                    if (!poFields.purchase_order_no) poFields.purchase_order_no = purchaseOrder.poId;
-                    if (!poFields.date) poFields.date = new Date().toLocaleDateString();
-                    if (!poFields.investor_name) poFields.investor_name = investor.name;
-                    if (!poFields.eid_passport) poFields.eid_passport = lead.contactInfo?.passportOrEmiratesId || '';
-                    if (!poFields.car_make) poFields.car_make = lead.vehicleInfo?.make || '';
-                    if (!poFields.car_model) poFields.car_model = lead.vehicleInfo?.model || '';
-                    if (!poFields.car_trim) poFields.car_trim = lead.vehicleInfo?.trim || '';
-                    if (!poFields.car_color) poFields.car_color = lead.vehicleInfo?.color || '';
-                    if (!poFields.car_region) poFields.car_region = lead.vehicleInfo?.region || '';
-                    if (!poFields.car_mileage && lead.vehicleInfo?.mileage != null) poFields.car_mileage = lead.vehicleInfo.mileage;
-                    if (!poFields.car_chassis) poFields.car_chassis = lead.vehicleInfo?.vin || '';
-                    if (!poFields.car_yaer) poFields.car_yaer = String(lead.vehicleInfo?.year || '');
-                    if (!poFields.buying_price && lead.priceAnalysis?.purchasedFinalPrice != null) poFields.buying_price = lead.priceAnalysis.purchasedFinalPrice;
-                    lead.poFields = poFields;
-                    await lead.save();
-
-                    const envelope = await docusignService.createLeadPurchaseAgreement({ ...leadData, purchaseOrder });
-
-                    // Update PurchaseOrder with DocuSign info
-                    purchaseOrder.docuSignEnvelopeId = envelope.envelopeId;
+                if (docuSignResults.length > 0) {
+                    purchaseOrder.docuSignEnvelopeId = docuSignResults[0].envelopeId;
                     purchaseOrder.docuSignStatus = 'sent';
-                    purchaseOrder.docuSignSentAt = new Date();
+                    purchaseOrder.docuSignSentAt = now;
+                    purchaseOrder.docuSignEnvelopes = docuSignResults;
+                    purchaseOrder.investorAllocations = purchaseOrder.investorAllocations.map((allocation) => {
+                        const match = docuSignResults.find(result => String(result.investorId) === String(allocation.investorId));
+                        if (match) {
+                            allocation.docuSignEnvelopeId = match.envelopeId;
+                            allocation.docuSignStatus = match.status;
+                            allocation.docuSignSentAt = now;
+                        }
+                        return allocation;
+                    });
                     await purchaseOrder.save();
 
-                    logger.info(`DocuSign envelope sent for lead ${lead.leadId}: ${envelope.envelopeId}`);
+                    logger.info(`DocuSign envelopes sent for lead ${lead.leadId}:`, docuSignResults.map(result => result.envelopeId));
                 } else {
-                    logger.warn(`No investor found for lead ${lead.leadId} - DocuSign not sent`);
+                    logger.warn(`No DocuSign envelopes were sent for lead ${lead.leadId}`);
+                    purchaseOrder.docuSignStatus = 'failed';
+                    purchaseOrder.docuSignError = docuSignErrors.length > 0
+                        ? JSON.stringify(docuSignErrors)
+                        : 'No investor envelopes were sent';
+                    purchaseOrder.docuSignFailedAt = now;
+                    await purchaseOrder.save();
                 }
-            } catch (docuSignError) {
-                logger.error(`Failed to send DocuSign envelope for lead ${lead.leadId}:`, docuSignError);
-
-                // Update PurchaseOrder with failure status if it exists
-                if (lead.purchaseOrder) {
-                    const purchaseOrder = await PurchaseOrder.findById(lead.purchaseOrder);
-                    if (purchaseOrder) {
-                        purchaseOrder.docuSignStatus = 'failed';
-                        purchaseOrder.docuSignError = docuSignError.message;
-                        purchaseOrder.docuSignFailedAt = new Date();
-                        await purchaseOrder.save();
-                    }
-                }
-
-                // Continue with approval even if DocuSign fails
-                logger.info(`Lead ${lead.leadId} approved but DocuSign failed - manual intervention may be required`);
-
-                // Log DocuSign failure (skip email notification for now due to SMTP issues)
-                logger.warn(`DocuSign failure for lead ${lead.leadId}: ${docuSignError.message}`);
-                logger.info('Please check DocuSign template configuration and ensure it has the "investor" role');
             }
         }
         await lead.save();
@@ -2596,12 +3207,13 @@ exports.getSignedDocument = async (req, res, next) => {
             if (looksLikePdf(buffer)) return buffer;
 
             // If content is missing or corrupt, try refetching from DocuSign now
-            if (!purchaseOrder.docuSignEnvelopeId) {
+            const sourceEnvelopeId = document.sourceEnvelopeId || purchaseOrder.docuSignEnvelopeId;
+            if (!sourceEnvelopeId) {
                 return null;
             }
 
             try {
-                const signedDocs = await docusignService.getSignedDocuments(purchaseOrder.docuSignEnvelopeId);
+                const signedDocs = await docusignService.getSignedDocuments(sourceEnvelopeId);
                 const refreshed = (signedDocs || []).find(d => String(d.documentId) === String(documentId));
                 if (refreshed && refreshed.content) {
                     // Update stored document content for future requests

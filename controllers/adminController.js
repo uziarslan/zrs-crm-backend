@@ -67,38 +67,48 @@ exports.getDashboard = async (req, res, next) => {
 
         // Get recent inventory items (last 10)
         const recentInventory = await Lead.find({ status: 'inventory' })
-            .populate('investor', 'name email')
+            .populate('investorAllocations.investorId', 'name email')
             .populate('createdBy', 'name email')
             .sort({ createdAt: -1 })
             .limit(10);
 
-        const recentInventoryData = recentInventory.map(lead => ({
-            _id: lead._id,
-            leadId: lead.leadId,
-            vehicleId: lead.leadId,
-            vehicleDetails: lead.vehicleInfo ? `${lead.vehicleInfo.make} ${lead.vehicleInfo.model} ${lead.vehicleInfo.year}` : 'N/A',
-            vehicleInfo: {
-                make: lead.vehicleInfo?.make,
-                model: lead.vehicleInfo?.model,
-                year: lead.vehicleInfo?.year,
-                trim: lead.vehicleInfo?.trim,
-                color: lead.vehicleInfo?.color,
-                region: lead.vehicleInfo?.region,
-                mileage: lead.vehicleInfo?.mileage,
-                vin: lead.vehicleInfo?.vin,
-                askingPrice: lead.vehicleInfo?.askingPrice,
-                purchasePrice: lead.priceAnalysis?.purchasedFinalPrice,
-                minSellingPrice: lead.priceAnalysis?.minSellingPrice,
-                maxSellingPrice: lead.priceAnalysis?.maxSellingPrice
-            },
-            images: (lead.attachments || []).filter(a => a.category === 'carPictures').map(img => ({
-                url: img.url,
-                publicId: img.publicId
-            })),
-            investor: lead.investor,
-            status: lead.status,
-            createdAt: lead.createdAt
-        }));
+        const recentInventoryData = recentInventory.map(lead => {
+            const primaryAllocation = Array.isArray(lead.investorAllocations) ? lead.investorAllocations[0] : null;
+            const investorDoc = primaryAllocation?.investorId;
+            const investorSummary = investorDoc ? {
+                _id: investorDoc._id || investorDoc,
+                name: investorDoc.name,
+                email: investorDoc.email
+            } : null;
+
+            return {
+                _id: lead._id,
+                leadId: lead.leadId,
+                vehicleId: lead.leadId,
+                vehicleDetails: lead.vehicleInfo ? `${lead.vehicleInfo.make} ${lead.vehicleInfo.model} ${lead.vehicleInfo.year}` : 'N/A',
+                vehicleInfo: {
+                    make: lead.vehicleInfo?.make,
+                    model: lead.vehicleInfo?.model,
+                    year: lead.vehicleInfo?.year,
+                    trim: lead.vehicleInfo?.trim,
+                    color: lead.vehicleInfo?.color,
+                    region: lead.vehicleInfo?.region,
+                    mileage: lead.vehicleInfo?.mileage,
+                    vin: lead.vehicleInfo?.vin,
+                    askingPrice: lead.vehicleInfo?.askingPrice,
+                    purchasePrice: lead.priceAnalysis?.purchasedFinalPrice,
+                    minSellingPrice: lead.priceAnalysis?.minSellingPrice,
+                    maxSellingPrice: lead.priceAnalysis?.maxSellingPrice
+                },
+                images: (lead.attachments || []).filter(a => a.category === 'carPictures').map(img => ({
+                    url: img.url,
+                    publicId: img.publicId
+                })),
+                investor: investorSummary,
+                status: lead.status,
+                createdAt: lead.createdAt
+            };
+        });
 
         res.status(200).json({
             success: true,

@@ -266,7 +266,15 @@ exports.getCurrentUser = async (req, res, next) => {
  */
 exports.inviteUser = async (req, res, next) => {
     try {
-        const { email, role, name, creditLimit } = req.body;
+        const {
+            email,
+            role,
+            name,
+            creditLimit,
+            decidedPercentageMin,
+            decidedPercentageMax,
+            decidedPercentage
+        } = req.body;
 
         // Check if user already exists
         const existingManager = await Manager.findOne({ email });
@@ -277,6 +285,54 @@ exports.inviteUser = async (req, res, next) => {
             return res.status(400).json({
                 success: false,
                 message: 'User with this email already exists'
+            });
+        }
+
+        const parsedCreditLimit =
+            creditLimit === undefined || creditLimit === null ? 0 : Number(creditLimit);
+        if (Number.isNaN(parsedCreditLimit) || parsedCreditLimit < 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Credit limit must be a non-negative number'
+            });
+        }
+
+        let parsedDecidedPercentageMin =
+            decidedPercentageMin === undefined || decidedPercentageMin === null
+                ? undefined
+                : Number(decidedPercentageMin);
+        let parsedDecidedPercentageMax =
+            decidedPercentageMax === undefined || decidedPercentageMax === null
+                ? undefined
+                : Number(decidedPercentageMax);
+
+        if (parsedDecidedPercentageMin === undefined && parsedDecidedPercentageMax === undefined && decidedPercentage !== undefined) {
+            const fallback = Number(decidedPercentage);
+            parsedDecidedPercentageMin = fallback;
+            parsedDecidedPercentageMax = fallback;
+        }
+
+        if (parsedDecidedPercentageMin === undefined) parsedDecidedPercentageMin = 0;
+        if (parsedDecidedPercentageMax === undefined) parsedDecidedPercentageMax = parsedDecidedPercentageMin;
+
+        if (
+            Number.isNaN(parsedDecidedPercentageMin) ||
+            Number.isNaN(parsedDecidedPercentageMax) ||
+            parsedDecidedPercentageMin < 0 ||
+            parsedDecidedPercentageMin > 100 ||
+            parsedDecidedPercentageMax < 0 ||
+            parsedDecidedPercentageMax > 100
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: 'Decided percentage must be between 0 and 100'
+            });
+        }
+
+        if (parsedDecidedPercentageMin > parsedDecidedPercentageMax) {
+            return res.status(400).json({
+                success: false,
+                message: 'Minimum decided percentage cannot be greater than maximum decided percentage'
             });
         }
 
@@ -302,7 +358,9 @@ exports.inviteUser = async (req, res, next) => {
                 email,
                 role: 'investor',
                 status: 'invited',
-                creditLimit: creditLimit || 0,
+                creditLimit: parsedCreditLimit,
+                decidedPercentageMin: parsedDecidedPercentageMin,
+                decidedPercentageMax: parsedDecidedPercentageMax,
                 inviteToken,
                 inviteTokenExpiry,
                 createdBy: req.userId
@@ -345,7 +403,9 @@ exports.inviteUser = async (req, res, next) => {
         // Log invitation
         await logUserManagement(req, 'user_invited', `Invited ${email} as ${role}`, user, {
             role,
-            creditLimit: role === 'investor' ? creditLimit : null
+            creditLimit: role === 'investor' ? parsedCreditLimit : null,
+            decidedPercentageMin: role === 'investor' ? parsedDecidedPercentageMin : null,
+            decidedPercentageMax: role === 'investor' ? parsedDecidedPercentageMax : null
         });
 
         res.status(201).json({

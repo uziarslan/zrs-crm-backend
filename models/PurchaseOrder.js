@@ -30,7 +30,31 @@ const purchaseOrderSchema = new mongoose.Schema({
         percentage: {
             type: Number,
             required: true
-        }
+        },
+        docuSignEnvelopeId: String,
+        docuSignStatus: {
+            type: String,
+            enum: ['created', 'sent', 'delivered', 'signed', 'completed', 'declined', 'voided', 'failed'],
+            default: 'created'
+        },
+        docuSignSentAt: Date,
+        docuSignCompletedAt: Date
+    }],
+    docuSignEnvelopes: [{
+        investorId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Investor'
+        },
+        investorName: String,
+        investorEmail: String,
+        envelopeId: String,
+        status: {
+            type: String,
+            enum: ['created', 'sent', 'delivered', 'signed', 'completed', 'declined', 'voided', 'failed'],
+            default: 'sent'
+        },
+        sentAt: Date,
+        completedAt: Date
     }],
     docuSignEnvelopeId: String,
     docuSignStatus: {
@@ -50,7 +74,12 @@ const purchaseOrderSchema = new mongoose.Schema({
         // Base64 content of the PDF returned by DocuSign (used for inline viewing)
         content: String,
         // Optional DocuSign uri reference
-        uri: String
+        uri: String,
+        sourceEnvelopeId: String,
+        investorId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Investor'
+        }
     }],
     // Cost fields to be captured before dual approval
     transferCost: { type: Number }, // transfer_cost_rta
@@ -58,6 +87,26 @@ const purchaseOrderSchema = new mongoose.Schema({
     agent_commision: { type: Number, default: 0 },
     car_recovery_cost: { type: Number, default: 0 },
     other_charges: { type: Number, default: 0 },
+    transferCostInvestor: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Investor'
+    },
+    detailingInspectionCostInvestor: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Investor'
+    },
+    agentCommissionInvestor: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Investor'
+    },
+    carRecoveryCostInvestor: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Investor'
+    },
+    otherChargesInvestor: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Investor'
+    },
     total_investment: { type: Number },
     prepared_by: { type: String },
     status: {

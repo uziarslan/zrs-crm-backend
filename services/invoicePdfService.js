@@ -10,8 +10,13 @@ async function renderInvoiceHtml(invoiceData) {
     // Ensure numbers are formatted as strings
     const formatted = { ...invoiceData };
     const numFields = [
-        'buying_price', 'transfer_cost', 'detailing_inspection_cost',
-        'other_charges', 'total_amount_payable'
+        'buying_price',
+        'transfer_cost',
+        'detailing_inspection_cost',
+        'agent_commission',
+        'car_recovery_cost',
+        'other_charges',
+        'total_amount_payable'
     ];
     for (const key of numFields) {
         if (formatted[key] != null && formatted[key] !== '') {
@@ -123,13 +128,20 @@ exports.generateInvoicePdfBuffer = async (invoiceData) => {
         doc.moveDown(0.2); // extra spacing between heading and table
         heading('Invoice Details');
         doc.font('Helvetica');
-        y = drawTable(doc, doc.page.margins.left, doc.y, [140, 350], [
+        const invoiceDetailsRows = [
             ['Invoice No', invoiceData.invoice_no || ''],
             ['Date', invoiceData.date || ''],
             ['Investor Name', invoiceData.investor_name || ''],
             ['Prepared By', invoiceData.prepared_by || ''],
             ['Reference PO No', invoiceData.reference_po_no || '']
-        ]);
+        ];
+        if (invoiceData.investment_percentage) {
+            invoiceDetailsRows.push([
+                'Investment Percentage',
+                `${invoiceData.investment_percentage}%`
+            ]);
+        }
+        y = drawTable(doc, doc.page.margins.left, doc.y, [140, 350], invoiceDetailsRows);
 
         doc.moveDown(0.8); // a bit more spacing before next section
         heading('Vehicle Details');

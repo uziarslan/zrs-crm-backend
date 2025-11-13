@@ -127,12 +127,23 @@ const leadSchema = new mongoose.Schema({
             enum: ['Admin', 'Manager']
         }
     },
-    // Investor assigned for funding the purchase
-    investor: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'Investor',
-        default: null
-    },
+    investorAllocations: [{
+        investorId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Investor',
+            required: true
+        },
+        percentage: {
+            type: Number,
+            min: 0,
+            max: 100,
+            required: true
+        },
+        amount: {
+            type: Number,
+            default: 0
+        }
+    }],
     // Simple dual approval tracking (1 from each admin group)
     approval: {
         status: {

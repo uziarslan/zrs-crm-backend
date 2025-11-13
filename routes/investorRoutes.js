@@ -7,6 +7,9 @@ const { validate, mongoIdValidation } = require('../middleware/validators');
 // Get all investors (Admin only)
 router.get('/', authenticate, isAdmin, investorController.getAllInvestors);
 
+// Create investor (Admin only)
+router.post('/', authenticate, isAdmin, investorController.createInvestor);
+
 // Get investor SOA
 router.get(
     '/:id/soa',
@@ -25,6 +28,16 @@ router.get(
     investorController.getInvestorInventory
 );
 
+// Update investor (Admin only)
+router.put(
+    '/:id',
+    authenticate,
+    isAdmin,
+    mongoIdValidation,
+    validate,
+    investorController.updateInvestor
+);
+
 // Update credit limit (Admin only)
 router.put(
     '/:id/credit-limit',
@@ -33,6 +46,16 @@ router.put(
     mongoIdValidation,
     validate,
     investorController.updateCreditLimit
+);
+
+// Delete investor (Admin only)
+router.delete(
+    '/:id',
+    authenticate,
+    isAdmin,
+    mongoIdValidation,
+    validate,
+    investorController.deleteInvestor
 );
 
 // Generate SOA (Admin only)

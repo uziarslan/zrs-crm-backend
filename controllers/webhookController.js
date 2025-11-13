@@ -100,15 +100,40 @@ exports.docusignWebhook = async (req, res, next) => {
             recipientCount: data?.envelopeSummary?.recipients?.signers?.length || 0
         });
 
-        // Debug: Check if PurchaseOrder exists with this envelope ID
-        const purchaseOrder = await PurchaseOrder.findOne({ docuSignEnvelopeId: envelopeId });
-        let lead = purchaseOrder ? await Lead.findOne({ purchaseOrder: purchaseOrder._id }) : null;
+        if (!envelopeId) {
+            logger.warn('🔍 NO ENVELOPE ID FOUND:');
+            logger.warn('📋 Raw Body:', JSON.stringify(req.body, null, 2));
+            logger.warn('📋 Data Object:', JSON.stringify(data, null, 2));
+            logger.warn('📋 This might indicate:');
+            logger.warn('   - DocuSign webhook not configured properly');
+            logger.warn('   - Webhook data format is different than expected');
+            logger.warn('   - DocuSign is not sending the expected data structure');
+            return res.status(400).json({ success: false, message: 'Missing envelope ID' });
+        }
+
+        // Find PurchaseOrder with this envelope ID (top-level or per-investor envelope)
+        const po = await PurchaseOrder.findOne({
+            $or: [
+                { docuSignEnvelopeId: envelopeId },
+                { 'docuSignEnvelopes.envelopeId': envelopeId },
+                { 'investorAllocations.docuSignEnvelopeId': envelopeId }
+            ]
+        })
+            .populate('investorAllocations.investorId');
+
+        let lead = null;
+        if (po) {
+            lead = await Lead.findOne({ purchaseOrder: po._id })
+                .populate('investorAllocations.investorId', 'name email')
+                .populate('createdBy');
+        }
+
         logger.info('Webhook purchase order lookup:', {
             envelopeId,
-            purchaseOrderFound: !!purchaseOrder,
+            purchaseOrderFound: !!po,
             leadFound: !!lead,
             leadId: lead?.leadId,
-            docuSignStatus: purchaseOrder?.docuSignStatus
+            docuSignStatus: po?.docuSignStatus
         });
 
         // Debug: Log the full webhook data structure
@@ -125,28 +150,6 @@ exports.docusignWebhook = async (req, res, next) => {
         })));
         logger.info('📋 Full Envelope Summary:', JSON.stringify(data?.envelopeSummary, null, 2));
         logger.info('📋 Full Recipients:', JSON.stringify(data?.envelopeSummary?.recipients, null, 2));
-
-        if (!envelopeId) {
-            logger.warn('🔍 NO ENVELOPE ID FOUND:');
-            logger.warn('📋 Raw Body:', JSON.stringify(req.body, null, 2));
-            logger.warn('📋 Data Object:', JSON.stringify(data, null, 2));
-            logger.warn('📋 This might indicate:');
-            logger.warn('   - DocuSign webhook not configured properly');
-            logger.warn('   - Webhook data format is different than expected');
-            logger.warn('   - DocuSign is not sending the expected data structure');
-            return res.status(400).json({ success: false, message: 'Missing envelope ID' });
-        }
-
-        // Find PurchaseOrder with this envelope ID
-        const po = await PurchaseOrder.findOne({ docuSignEnvelopeId: envelopeId })
-            .populate('investorAllocations.investorId');
-
-        // Find associated lead (reuse the lead variable from above)
-        if (po && !lead) {
-            lead = await Lead.findOne({ purchaseOrder: po._id })
-                .populate('investor')
-                .populate('createdBy');
-        }
 
         if (po && lead) {
             // Handle Lead Purchase Agreement signing - only update DocuSign status
@@ -165,6 +168,127 @@ exports.docusignWebhook = async (req, res, next) => {
             }
 
             docuSignStatus = docuSignStatus ? docuSignStatus.toLowerCase() : 'failed';
+
+            let matchingEnvelope = po.docuSignEnvelopes?.find(env => String(env.envelopeId) === String(envelopeId));
+            let matchingAllocation = po.investorAllocations?.find(allocation => {
+                const allocationInvestorId = allocation.investorId?._id || allocation.investorId;
+                const matchesEnvelope = matchingEnvelope && allocationInvestorId && matchingEnvelope.investorId && String(allocationInvestorId) === String(matchingEnvelope.investorId);
+                return String(allocation.docuSignEnvelopeId) === String(envelopeId) || matchesEnvelope;
+            });
+            const statusTimestamp = new Date();
+
+            const applyStatusToMatching = (status) => {
+                const normalized = (status || 'sent').toLowerCase();
+
+                if (!Array.isArray(po.docuSignEnvelopes)) {
+                    po.docuSignEnvelopes = [];
+                }
+
+                if (!matchingEnvelope) {
+                    const inferredInvestorId = matchingAllocation?.investorId?._id || matchingAllocation?.investorId || null;
+                    const inferredInvestorName = matchingAllocation?.investorId?.name || matchingAllocation?.investorName;
+                    const inferredInvestorEmail = matchingAllocation?.investorId?.email || matchingAllocation?.investorEmail;
+                    const newEnvelopeRecord = {
+                        investorId: inferredInvestorId,
+                        investorName: inferredInvestorName,
+                        investorEmail: inferredInvestorEmail,
+                        envelopeId,
+                        status: normalized,
+                        sentAt: undefined,
+                        completedAt: undefined
+                    };
+                    po.docuSignEnvelopes.push(newEnvelopeRecord);
+                    matchingEnvelope = newEnvelopeRecord;
+                }
+
+                if (!matchingAllocation && matchingEnvelope?.investorId) {
+                    matchingAllocation = po.investorAllocations?.find((allocation) => {
+                        const allocationInvestorId = allocation.investorId?._id || allocation.investorId;
+                        return allocationInvestorId && String(allocationInvestorId) === String(matchingEnvelope.investorId);
+                    }) || matchingAllocation;
+                }
+
+                if (matchingEnvelope) {
+                    matchingEnvelope.status = normalized;
+                    if (normalized === 'completed') {
+                        matchingEnvelope.completedAt = statusTimestamp;
+                    } else if (['sent', 'delivered', 'signed'].includes(normalized) && !matchingEnvelope.sentAt) {
+                        matchingEnvelope.sentAt = statusTimestamp;
+                    }
+                }
+
+                if (matchingAllocation) {
+                    matchingAllocation.docuSignStatus = normalized;
+                    if (normalized === 'completed') {
+                        matchingAllocation.docuSignCompletedAt = statusTimestamp;
+                    } else if (['sent', 'delivered', 'signed'].includes(normalized) && !matchingAllocation.docuSignSentAt) {
+                        matchingAllocation.docuSignSentAt = statusTimestamp;
+                    }
+                }
+
+                if (['sent', 'delivered', 'signed'].includes(normalized) && !po.docuSignSentAt) {
+                    po.docuSignSentAt = statusTimestamp;
+                }
+                if (normalized === 'completed') {
+                    po.docuSignSignedAt = po.docuSignSignedAt || statusTimestamp;
+                }
+            };
+
+            const aggregateStatuses = () => {
+                const statusOrder = ['failed', 'voided', 'declined', 'created', 'sent', 'delivered', 'signed', 'completed'];
+                const statuses = (po.docuSignEnvelopes || []).map(env => env.status).filter(Boolean);
+
+                if (statuses.length === 0) {
+                    po.docuSignStatus = po.docuSignStatus || 'created';
+                    return;
+                }
+
+                if (statuses.every(status => status === 'completed')) {
+                    po.docuSignStatus = 'completed';
+                    po.status = 'signed';
+                    po.docuSignSignedAt = po.docuSignSignedAt || new Date();
+                    return;
+                }
+
+                if (statuses.some(status => status === 'voided')) {
+                    po.docuSignStatus = 'voided';
+                    po.status = 'draft';
+                    return;
+                }
+
+                if (statuses.some(status => status === 'declined')) {
+                    po.docuSignStatus = 'declined';
+                    po.status = 'rejected';
+                    return;
+                }
+
+                if (statuses.some(status => status === 'failed')) {
+                    po.docuSignStatus = 'failed';
+                    return;
+                }
+
+                if (statuses.some(status => status === 'signed')) {
+                    po.docuSignStatus = 'signed';
+                    po.status = 'pending_signature';
+                    return;
+                }
+
+                if (statuses.some(status => status === 'delivered')) {
+                    po.docuSignStatus = 'delivered';
+                    po.status = 'pending_signature';
+                    return;
+                }
+
+                if (statuses.some(status => status === 'sent')) {
+                    po.docuSignStatus = 'sent';
+                    po.status = 'pending_signature';
+                    return;
+                }
+
+                // Fallback to the highest precedence status found
+                const sortedStatuses = statuses.sort((a, b) => statusOrder.indexOf(a) - statusOrder.indexOf(b));
+                po.docuSignStatus = sortedStatuses[0] || po.docuSignStatus || 'sent';
+            };
 
             // Check if any recipient has completed status
             const hasCompletedRecipient = data?.envelopeSummary?.recipients?.signers?.some(signer =>
@@ -195,6 +319,7 @@ exports.docusignWebhook = async (req, res, next) => {
                 lead.approval.status = 'not_submitted';
                 lead.approval.approvals = [];
                 po.docuSignStatus = 'voided';
+                applyStatusToMatching('voided');
                 po.status = 'draft'; // Reset PO status to draft
                 po.docuSignError = 'Envelope deleted in DocuSign';
                 po.docuSignFailedAt = new Date();
@@ -206,10 +331,12 @@ exports.docusignWebhook = async (req, res, next) => {
                 lead.approval.status = 'not_submitted';
                 lead.approval.approvals = [];
                 po.docuSignStatus = docuSignStatus;
+                applyStatusToMatching(docuSignStatus);
                 po.docuSignError = null;
                 po.docuSignFailedAt = new Date();
                 logger.info(`Lead ${lead.leadId} Purchase Agreement ${docuSignStatus} - approval reset`);
             } else if (docuSignStatus === 'completed' || hasCompletedRecipient || isCompletionEvent) {
+                applyStatusToMatching('completed');
                 po.docuSignStatus = 'completed';
                 po.docuSignSignedAt = new Date();
 
@@ -221,6 +348,7 @@ exports.docusignWebhook = async (req, res, next) => {
                     if (signedDocuments && signedDocuments.length > 0) {
                         // Validate and filter documents with valid base64 PDF content
                         const validDocuments = [];
+                        const investorIdForDoc = matchingEnvelope?.investorId || (matchingAllocation?.investorId?._id || matchingAllocation?.investorId);
                         for (const doc of signedDocuments) {
                             if (!doc.content || typeof doc.content !== 'string') {
                                 logger.warn(`Document ${doc.documentId} (${doc.name}) has no content or invalid content type`);
@@ -244,7 +372,9 @@ exports.docusignWebhook = async (req, res, next) => {
                                     fileType: doc.fileType || 'application/pdf',
                                     fileSize: doc.fileSize || buffer.length,
                                     content: cleanedBase64, // Store clean base64 without data URI prefix
-                                    uri: doc.uri
+                                    uri: doc.uri,
+                                    sourceEnvelopeId: envelopeId,
+                                    investorId: investorIdForDoc
                                 });
 
                                 logger.info(`✅ Validated and storing document ${doc.documentId}:`, {
@@ -260,7 +390,9 @@ exports.docusignWebhook = async (req, res, next) => {
                         }
 
                         if (validDocuments.length > 0) {
-                            po.docuSignDocuments = validDocuments;
+                            const existingDocuments = Array.isArray(po.docuSignDocuments) ? po.docuSignDocuments : [];
+                            const filtered = existingDocuments.filter(existing => !(existing.sourceEnvelopeId === envelopeId && validDocuments.some(doc => doc.documentId === existing.documentId)));
+                            po.docuSignDocuments = [...filtered, ...validDocuments];
                             logger.info(`✅ Stored ${validDocuments.length} validated signed documents for lead ${lead.leadId}`);
                         } else {
                             logger.warn(`No valid documents found after validation for envelope ${envelopeId}`);
@@ -276,6 +408,7 @@ exports.docusignWebhook = async (req, res, next) => {
                 logger.info(`Lead ${lead.leadId} Purchase Agreement signed by investor`);
             } else {
                 // Update with valid status
+                applyStatusToMatching(docuSignStatus);
                 po.docuSignStatus = validStatuses.includes(docuSignStatus) ? docuSignStatus : 'sent';
                 logger.info(`Lead ${lead.leadId} DocuSign status updated to: ${po.docuSignStatus}`);
 
@@ -287,6 +420,7 @@ exports.docusignWebhook = async (req, res, next) => {
             }
 
             // Save both PurchaseOrder and Lead
+            aggregateStatuses();
             await po.save();
             await lead.save();
             logger.info('🔍 DATABASE UPDATE DEBUG:');
@@ -306,7 +440,7 @@ exports.docusignWebhook = async (req, res, next) => {
             logger.info('   - Different envelope ID format');
         }
 
-        if (po) {
+        if (po && !lead) {
             // Normalize status/event
             const statusLower = (status || '').toLowerCase();
             const eventLower = (event || '').toLowerCase();
@@ -334,7 +468,7 @@ exports.docusignWebhook = async (req, res, next) => {
             }
 
             await po.save();
-        } else {
+        } else if (!po) {
             // No Purchase Order found for this envelope
             logger.warn(`No PO found for DocuSign envelope ${envelopeId}`);
         }
