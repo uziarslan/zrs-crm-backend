@@ -15,6 +15,10 @@ const investorSchema = new mongoose.Schema({
         trim: true,
         match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email']
     },
+    investorEid: {
+        type: String,
+        trim: true
+    },
     role: {
         type: String,
         default: 'investor',

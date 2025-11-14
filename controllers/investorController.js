@@ -1,5 +1,7 @@
 const Investor = require('../models/Investor');
 const InvestorSOA = require('../models/InvestorSOA');
+const InvestorAgreement = require('../models/InvestorAgreement');
+const Admin = require('../models/Admin');
 const Lead = require('../models/Lead');
 const Sale = require('../models/Sale');
 const PurchaseOrder = require('../models/PurchaseOrder');
@@ -7,6 +9,7 @@ const logger = require('../utils/logger');
 const { logInvestor, logUserManagement } = require('../utils/auditLogger');
 const { sendMailtrapEmail } = require('../services/mailtrapService');
 const { generateInviteToken } = require('../utils/otpHelper');
+const docusignService = require('../services/docusignService');
 
 /**
  * @desc    Get investor Statement of Accounts (SOA)
@@ -193,6 +196,25 @@ exports.getAllInvestors = async (req, res, next) => {
             .sort({ createdAt: -1 })
             .lean();
 
+        // Get all investor agreements to map status
+        const investorAgreements = await InvestorAgreement.find({})
+            .select('investorId envelopeId status docuSignStatus completedAt signedDocuments')
+            .lean();
+
+        const agreementMap = new Map();
+        investorAgreements.forEach(agreement => {
+            const investorIdStr = agreement.investorId?.toString() || agreement.investorId;
+            if (investorIdStr && !agreementMap.has(investorIdStr)) {
+                agreementMap.set(investorIdStr, {
+                    envelopeId: agreement.envelopeId,
+                    status: agreement.status,
+                    docuSignStatus: agreement.docuSignStatus,
+                    completedAt: agreement.completedAt,
+                    hasDocuments: agreement.signedDocuments && agreement.signedDocuments.length > 0
+                });
+            }
+        });
+
         const normalizedInvestors = investors.map((investor) => {
             const legacyPercentage = typeof investor.decidedPercentage === 'number'
                 ? investor.decidedPercentage
@@ -227,10 +249,14 @@ exports.getAllInvestors = async (req, res, next) => {
                 max = temp;
             }
 
+            const investorIdStr = investor._id.toString();
+            const agreement = agreementMap.get(investorIdStr);
+
             return {
                 ...investor,
                 decidedPercentageMin: typeof min === 'number' ? min : 0,
-                decidedPercentageMax: typeof max === 'number' ? max : (typeof min === 'number' ? min : 0)
+                decidedPercentageMax: typeof max === 'number' ? max : (typeof min === 'number' ? min : 0),
+                agreement: agreement || null
             };
         });
 
@@ -259,7 +285,9 @@ exports.createInvestor = async (req, res, next) => {
             decidedPercentageMin,
             decidedPercentageMax,
             decidedPercentage,
-            status
+            status,
+            investorEid,
+            adminDesignation
         } = req.body;
         const allowedStatuses = ['invited', 'active', 'inactive'];
 
@@ -268,6 +296,40 @@ exports.createInvestor = async (req, res, next) => {
                 success: false,
                 message: 'Name and email are required'
             });
+        }
+
+        if (!investorEid) {
+            return res.status(400).json({
+                success: false,
+                message: 'Investor Emirates ID is required'
+            });
+        }
+
+        // Get admin info - always fetch fresh from database
+        const admin = await Admin.findById(req.userId);
+        if (!admin) {
+            return res.status(404).json({
+                success: false,
+                message: 'Admin not found'
+            });
+        }
+
+        // Check if admin has designation, if not require it from request
+        let finalAdminDesignation = admin.designation;
+        if (!finalAdminDesignation || finalAdminDesignation.trim() === '') {
+            if (!adminDesignation || adminDesignation.trim() === '') {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Admin designation is required. Please provide designation.'
+                });
+            }
+            // Save designation to admin
+            admin.designation = adminDesignation.trim();
+            await admin.save();
+            // Refresh admin from database to ensure we have the latest data
+            const refreshedAdmin = await Admin.findById(req.userId);
+            finalAdminDesignation = refreshedAdmin.designation;
+            logger.info(`Admin ${admin.email} designation saved: ${finalAdminDesignation}`);
         }
 
         const parsedCreditLimit = Number(creditLimit);
@@ -336,6 +398,7 @@ exports.createInvestor = async (req, res, next) => {
         const investor = await Investor.create({
             name,
             email: email.toLowerCase(),
+            investorEid,
             creditLimit: parsedCreditLimit,
             decidedPercentageMin: parsedDecidedPercentageMin,
             decidedPercentageMax: parsedDecidedPercentageMax,
@@ -345,28 +408,55 @@ exports.createInvestor = async (req, res, next) => {
             createdBy: req.userId
         });
 
-        const inviteLink = `${process.env.DOMAIN_FRONTEND || process.env.DOMAIN_BACKEND || 'http://localhost:3000'}/invite/${inviteToken}`;
-
-        if (!process.env.USER_ACCOUNT_ACTIVATION_ID) {
-            throw new Error('USER_ACCOUNT_ACTIVATION_ID not configured in environment variables. Please configure Mailtrap template ID.');
+        // Send DocuSign Investor Agreement
+        if (!process.env.DOCUSIGN_PURCHASE_INVESTMENT_AGREEMENT_TEMPLATE_ID) {
+            throw new Error('DOCUSIGN_PURCHASE_INVESTMENT_AGREEMENT_TEMPLATE_ID not configured in environment variables.');
         }
 
+        let envelopeResult;
         try {
-            await sendMailtrapEmail({
-                templateUuid: process.env.USER_ACCOUNT_ACTIVATION_ID,
-                templateVariables: {
-                    name: investor.name,
-                    role: 'Investor',
-                    activation_link: inviteLink,
-                    year: new Date().getFullYear().toString()
-                },
-                recipients: [investor.email]
+            envelopeResult = await docusignService.createInvestorAgreement({
+                adminName: admin.name,
+                adminDesignation: finalAdminDesignation,
+                adminEmail: admin.email,
+                investorName: investor.name,
+                investorEmail: investor.email,
+                investorEid: investorEid,
+                decidedPercentageMin: parsedDecidedPercentageMin,
+                decidedPercentageMax: parsedDecidedPercentageMax,
+                investmentAmount: parsedCreditLimit,
+                date: new Date()
             });
-            logger.info(`Activation email sent to ${investor.email} via Mailtrap`);
-        } catch (emailError) {
-            logger.error(`Failed to send activation email to ${investor.email}:`, emailError);
-            throw new Error(`Failed to send activation email via Mailtrap: ${emailError.message}`);
+            logger.info(`DocuSign Investor Agreement sent for investor ${investor.email}: ${envelopeResult.envelopeId}`);
+        } catch (docuSignError) {
+            logger.error(`Failed to send DocuSign Investor Agreement to ${investor.email}:`, docuSignError);
+            throw new Error(`Failed to send Investor Agreement via DocuSign: ${docuSignError.message}`);
         }
+
+        // Create InvestorAgreement record
+        const investorAgreement = await InvestorAgreement.create({
+            investorId: investor._id,
+            adminId: admin._id,
+            envelopeId: envelopeResult.envelopeId,
+            status: 'sent',
+            docuSignStatus: envelopeResult.status || 'sent',
+            sentAt: new Date(),
+            agreementData: {
+                adminName: admin.name,
+                adminDesignation: finalAdminDesignation,
+                investorName: investor.name,
+                investorEmail: investor.email,
+                investorEid: investorEid,
+                decidedPercentageMin: parsedDecidedPercentageMin,
+                decidedPercentageMax: parsedDecidedPercentageMax,
+                investmentAmount: parsedCreditLimit,
+                date: new Date()
+            }
+        });
+
+        logger.info(`Investor Agreement record created: ${investorAgreement._id}`);
+
+        // Note: Activation email will be sent automatically after both parties sign via webhook
 
         await logUserManagement(req, 'investor_invited', `Invited ${investor.email} as investor`, investor, {
             creditLimit: parsedCreditLimit,
@@ -706,6 +796,46 @@ exports.generateSOA = async (req, res, next) => {
         });
     } catch (error) {
         logger.error('Generate SOA error:', error);
+        next(error);
+    }
+};
+
+/**
+ * @desc    Get investor agreement document
+ * @route   GET /api/v1/investors/:id/agreement/document
+ * @access  Private (Admin only)
+ */
+exports.getInvestorAgreementDocument = async (req, res, next) => {
+    try {
+        const investorId = req.params.id;
+
+        const investorAgreement = await InvestorAgreement.findOne({ investorId })
+            .select('signedDocuments')
+            .lean();
+
+        if (!investorAgreement || !investorAgreement.signedDocuments || investorAgreement.signedDocuments.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'No signed documents found for this investor agreement'
+            });
+        }
+
+        // Return the first signed document
+        const document = investorAgreement.signedDocuments[0];
+
+        res.status(200).json({
+            success: true,
+            data: {
+                documentId: document.documentId,
+                name: document.name,
+                fileType: document.fileType,
+                fileSize: document.fileSize,
+                content: document.content, // Base64 encoded PDF
+                uri: document.uri
+            }
+        });
+    } catch (error) {
+        logger.error('Get investor agreement document error:', error);
         next(error);
     }
 };

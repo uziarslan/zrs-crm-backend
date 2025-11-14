@@ -1,7 +1,11 @@
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Lead = require('../models/Lead');
+const InvestorAgreement = require('../models/InvestorAgreement');
+const Investor = require('../models/Investor');
 const logger = require('../utils/logger');
 const { sendNotificationEmail } = require('../utils/emailService');
+const { sendMailtrapEmail } = require('../services/mailtrapService');
+const { generateInviteToken } = require('../utils/otpHelper');
 const docusignService = require('../services/docusignService');
 
 /**
@@ -111,6 +115,11 @@ exports.docusignWebhook = async (req, res, next) => {
             return res.status(400).json({ success: false, message: 'Missing envelope ID' });
         }
 
+        // Check for InvestorAgreement first
+        const investorAgreement = await InvestorAgreement.findOne({ envelopeId })
+            .populate('investorId')
+            .populate('adminId');
+
         // Find PurchaseOrder with this envelope ID (top-level or per-investor envelope)
         const po = await PurchaseOrder.findOne({
             $or: [
@@ -128,8 +137,9 @@ exports.docusignWebhook = async (req, res, next) => {
                 .populate('createdBy');
         }
 
-        logger.info('Webhook purchase order lookup:', {
+        logger.info('Webhook lookup:', {
             envelopeId,
+            investorAgreementFound: !!investorAgreement,
             purchaseOrderFound: !!po,
             leadFound: !!lead,
             leadId: lead?.leadId,
@@ -471,6 +481,295 @@ exports.docusignWebhook = async (req, res, next) => {
         } else if (!po) {
             // No Purchase Order found for this envelope
             logger.warn(`No PO found for DocuSign envelope ${envelopeId}`);
+        }
+
+        // Handle Investor Agreement if found
+        if (investorAgreement && (!po || po.docuSignEnvelopeId !== envelopeId)) {
+            const validStatuses = ['created', 'sent', 'delivered', 'signed', 'completed', 'declined', 'voided', 'failed'];
+
+            let docuSignStatus = status;
+            if (!docuSignStatus) {
+                docuSignStatus = data?.envelopeSummary?.status;
+            }
+            if (!docuSignStatus) {
+                docuSignStatus = data?.status;
+            }
+            if (!docuSignStatus) {
+                docuSignStatus = event;
+            }
+
+            docuSignStatus = docuSignStatus ? docuSignStatus.toLowerCase() : 'failed';
+
+            // Get recipient statuses - check the actual signer status
+            const recipientStatuses = data?.envelopeSummary?.recipients?.signers || [];
+            const investorRecipient = recipientStatuses.find(signer =>
+                signer.email?.toLowerCase() === investorAgreement.agreementData?.investorEmail?.toLowerCase()
+            );
+            const recipientStatus = investorRecipient?.status?.toLowerCase() || null;
+
+            // Check if recipient has actually signed (not just viewed/delivered)
+            const hasSignedRecipient = recipientStatus === 'completed' || recipientStatus === 'signed';
+
+            // Check if event indicates recipient or envelope completion
+            // recipient-completed means the recipient has signed
+            // envelope-completed means the envelope is fully completed
+            const isRecipientCompletedEvent = event === 'recipient-completed';
+            const isEnvelopeCompletedEvent = event === 'envelope-completed' || event === 'envelope-signed';
+            const isCompletionEvent = isRecipientCompletedEvent || isEnvelopeCompletedEvent;
+
+            // Treat as completed if:
+            // 1. Envelope status is completed AND (recipient has signed OR event indicates completion)
+            // 2. Event is recipient-completed (recipient signed)
+            // 3. Event is envelope-completed (envelope fully completed)
+            const isEnvelopeCompleted = docuSignStatus === 'completed' && (hasSignedRecipient || isCompletionEvent);
+            const shouldMarkAsCompleted = isRecipientCompletedEvent ||
+                isEnvelopeCompleted ||
+                (isEnvelopeCompletedEvent && docuSignStatus === 'completed');
+
+            logger.info('🔍 INVESTOR AGREEMENT STATUS PROCESSING:');
+            logger.info('📋 Envelope ID:', envelopeId);
+            logger.info('📋 Investor Agreement ID:', investorAgreement._id);
+            logger.info('📋 Current Status:', investorAgreement.docuSignStatus);
+            logger.info('📋 Incoming Status:', docuSignStatus);
+            logger.info('📋 Event:', event);
+            logger.info('📋 Recipient Status:', recipientStatus);
+            logger.info('📋 Has Signed Recipient:', hasSignedRecipient);
+            logger.info('📋 Is Recipient Completed Event:', isRecipientCompletedEvent);
+            logger.info('📋 Is Envelope Completed Event:', isEnvelopeCompletedEvent);
+            logger.info('📋 Is Completion Event:', isCompletionEvent);
+            logger.info('📋 Should Mark As Completed:', shouldMarkAsCompleted);
+            logger.info('📋 All Recipient Statuses:', recipientStatuses.map(s => ({ email: s.email, status: s.status })));
+
+            if (event === 'envelope-deleted' || docuSignStatus === 'declined' || docuSignStatus === 'voided') {
+                investorAgreement.docuSignStatus = docuSignStatus;
+                investorAgreement.status = docuSignStatus;
+                await investorAgreement.save();
+                logger.info(`Investor Agreement ${investorAgreement._id} ${docuSignStatus}`);
+            } else if (shouldMarkAsCompleted) {
+                investorAgreement.docuSignStatus = 'completed';
+                investorAgreement.status = 'completed';
+                investorAgreement.completedAt = new Date();
+
+                // Fetch and store the signed documents
+                try {
+                    logger.info(`Fetching signed documents for Investor Agreement envelope ${envelopeId}`);
+                    const signedDocuments = await docusignService.getSignedDocuments(envelopeId);
+
+                    if (signedDocuments && signedDocuments.length > 0) {
+                        const validDocuments = [];
+                        for (const doc of signedDocuments) {
+                            if (!doc.content || typeof doc.content !== 'string') {
+                                logger.warn(`Document ${doc.documentId} (${doc.name}) has no content or invalid content type`);
+                                continue;
+                            }
+
+                            try {
+                                const cleanedBase64 = doc.content.replace(/^data:application\/pdf;base64,/, '');
+                                const buffer = Buffer.from(cleanedBase64, 'base64');
+
+                                if (buffer.length < 4 || buffer.slice(0, 4).toString() !== '%PDF') {
+                                    logger.error(`Document ${doc.documentId} (${doc.name}) does not appear to be a valid PDF`);
+                                    continue;
+                                }
+
+                                validDocuments.push({
+                                    documentId: doc.documentId,
+                                    name: doc.name,
+                                    fileType: doc.fileType || 'application/pdf',
+                                    fileSize: doc.fileSize || buffer.length,
+                                    content: cleanedBase64,
+                                    uri: doc.uri
+                                });
+
+                                logger.info(`✅ Validated and storing Investor Agreement document ${doc.documentId}:`, {
+                                    name: doc.name,
+                                    contentLength: cleanedBase64.length,
+                                    pdfSize: buffer.length
+                                });
+                            } catch (validationError) {
+                                logger.error(`Failed to validate Investor Agreement document ${doc.documentId}:`, validationError);
+                                continue;
+                            }
+                        }
+
+                        if (validDocuments.length > 0) {
+                            investorAgreement.signedDocuments = validDocuments;
+                            logger.info(`✅ Stored ${validDocuments.length} validated signed documents for Investor Agreement ${investorAgreement._id}`);
+                        }
+                    }
+                } catch (docError) {
+                    logger.error(`Error fetching signed documents for Investor Agreement envelope ${envelopeId}:`, docError);
+                }
+
+                await investorAgreement.save();
+
+                logger.info(`✅ Investor Agreement ${investorAgreement._id} completed`);
+            } else {
+                // Update with valid status - but don't mark as completed unless actually signed
+                // Handle intermediate statuses like 'delivered' (document was delivered but not signed yet)
+                let newStatus = docuSignStatus;
+
+                // Check if envelope is completed - if so, mark as completed (event-based detection handled above)
+                // This handles cases where envelope status is "completed" but we didn't catch it in the completion check
+                if (docuSignStatus === 'completed' && (isRecipientCompletedEvent || isEnvelopeCompletedEvent)) {
+                    // This should have been caught above, but as a fallback, mark as completed
+                    investorAgreement.docuSignStatus = 'completed';
+                    investorAgreement.status = 'completed';
+                    investorAgreement.completedAt = new Date();
+                    await investorAgreement.save();
+                    logger.info(`Investor Agreement ${investorAgreement._id} marked as completed (fallback: envelope status completed)`);
+                }
+                // If status is 'delivered' or recipient status is 'delivered', update to delivered
+                else if (docuSignStatus === 'delivered' || recipientStatus === 'delivered') {
+                    newStatus = 'delivered';
+                }
+                // If status is 'signed' but envelope is not completed, update to signed
+                else if (docuSignStatus === 'signed' || recipientStatus === 'signed') {
+                    newStatus = 'signed';
+                }
+                // Otherwise use the envelope status if valid
+                else if (validStatuses.includes(docuSignStatus)) {
+                    newStatus = docuSignStatus;
+                }
+                // Default to current status or 'sent'
+                else {
+                    newStatus = investorAgreement.docuSignStatus || 'sent';
+                }
+
+                // Only update if status actually changed and it's not a completion status
+                // (completion status is handled above)
+                if (newStatus !== 'completed' && newStatus !== investorAgreement.docuSignStatus) {
+                    investorAgreement.docuSignStatus = newStatus;
+                    investorAgreement.status = newStatus;
+                    await investorAgreement.save();
+                    logger.info(`Investor Agreement ${investorAgreement._id} status updated to: ${newStatus} (recipient status: ${recipientStatus})`);
+                } else if (newStatus === 'completed') {
+                    // Already handled above
+                    logger.info(`Investor Agreement ${investorAgreement._id} already marked as completed`);
+                } else {
+                    logger.info(`Investor Agreement ${investorAgreement._id} status unchanged: ${investorAgreement.docuSignStatus} (incoming: ${docuSignStatus}, recipient: ${recipientStatus})`);
+                }
+            }
+
+            // Send activation email when investor signs (check after all status updates)
+            // Reload agreement to get latest state after save
+            const refreshedAgreement = await InvestorAgreement.findById(investorAgreement._id);
+            if (!refreshedAgreement) {
+                logger.error(`Investor Agreement ${investorAgreement._id} not found after save`);
+                return res.status(200).json({ success: true, message: 'Webhook processed' });
+            }
+
+            // Check if recipient has signed - use multiple ways to detect signing
+            // Priority: event type > recipient status > envelope status > agreement status
+            const recipientHasSigned = event === 'recipient-completed' ||
+                event === 'envelope-completed' ||
+                event === 'envelope-signed' ||
+                recipientStatus === 'completed' ||
+                recipientStatus === 'signed' ||
+                docuSignStatus === 'completed' ||
+                refreshedAgreement.docuSignStatus === 'completed' ||
+                refreshedAgreement.status === 'completed' ||
+                (recipientStatuses.length > 0 && recipientStatuses.some(s => {
+                    const signerEmail = (s.email || '').toLowerCase().trim();
+                    const investorEmail = (investorAgreement.agreementData?.investorEmail || '').toLowerCase().trim();
+                    const signerStatus = (s.status || '').toLowerCase();
+                    return (signerStatus === 'completed' || signerStatus === 'signed') &&
+                        signerEmail === investorEmail &&
+                        signerEmail !== '';
+                }));
+
+            // Check if email should be sent (recipient signed AND email not yet sent)
+            const shouldSendEmail = recipientHasSigned &&
+                !refreshedAgreement.activationEmailSent &&
+                refreshedAgreement.investorId;
+
+            if (shouldSendEmail) {
+                try {
+                    const investor = await Investor.findById(refreshedAgreement.investorId._id || refreshedAgreement.investorId);
+
+                    logger.info('🔍 CHECKING ACTIVATION EMAIL:', {
+                        envelopeId,
+                        investorId: refreshedAgreement.investorId,
+                        investorFound: !!investor,
+                        investorStatus: investor?.status,
+                        activationEmailSent: refreshedAgreement.activationEmailSent,
+                        recipientStatus: recipientStatus,
+                        docuSignStatus: docuSignStatus,
+                        event: event,
+                        recipientHasSigned: recipientHasSigned,
+                        allRecipients: recipientStatuses.map(s => ({ email: s.email, status: s.status }))
+                    });
+
+                    if (investor && investor.status === 'invited') {
+                        // Always generate a fresh invite token when agreement is signed
+                        // This ensures the token is not expired when the investor receives the email
+                        const inviteToken = generateInviteToken();
+                        const inviteTokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days from now
+                        investor.inviteToken = inviteToken;
+                        investor.inviteTokenExpiry = inviteTokenExpiry;
+                        await investor.save();
+                        logger.info(`✅ Generated fresh invite token for investor ${investor.email} (expires: ${inviteTokenExpiry.toISOString()})`);
+
+                        const inviteLink = `${process.env.DOMAIN_FRONTEND || process.env.DOMAIN_BACKEND || 'http://localhost:3000'}/invite/${inviteToken}`;
+
+                        // Send activation email
+                        if (process.env.USER_ACCOUNT_ACTIVATION_ID) {
+                            try {
+                                await sendMailtrapEmail({
+                                    templateUuid: process.env.USER_ACCOUNT_ACTIVATION_ID,
+                                    templateVariables: {
+                                        name: investor.name,
+                                        role: 'Investor',
+                                        activation_link: inviteLink,
+                                        year: new Date().getFullYear().toString()
+                                    },
+                                    recipients: [investor.email]
+                                });
+
+                                // Mark email as sent
+                                refreshedAgreement.activationEmailSent = true;
+                                refreshedAgreement.activationEmailSentAt = new Date();
+                                await refreshedAgreement.save();
+
+                                logger.info(`✅ Activation email sent to ${investor.email} after Investor Agreement signing`);
+                                logger.info(`✅ Activation email flag set for agreement ${refreshedAgreement._id}`);
+                            } catch (emailError) {
+                                logger.error(`Failed to send activation email to ${investor.email} after agreement signing:`, emailError);
+                                logger.error('Email error details:', {
+                                    message: emailError.message,
+                                    stack: emailError.stack,
+                                    templateUuid: process.env.USER_ACCOUNT_ACTIVATION_ID,
+                                    investorEmail: investor.email
+                                });
+                            }
+                        } else {
+                            logger.warn('USER_ACCOUNT_ACTIVATION_ID not configured - cannot send activation email');
+                        }
+                    } else {
+                        logger.info(`Skipping activation email - investor status: ${investor?.status || 'not found'}, email already sent: ${refreshedAgreement.activationEmailSent}`);
+                    }
+                } catch (emailCheckError) {
+                    logger.error(`Error checking/sending activation email for investor agreement ${refreshedAgreement._id}:`, emailCheckError);
+                    logger.error('Email check error details:', {
+                        message: emailCheckError.message,
+                        stack: emailCheckError.stack
+                    });
+                }
+            } else {
+                logger.info('🔍 ACTIVATION EMAIL CHECK SKIPPED:', {
+                    recipientHasSigned,
+                    agreementExists: !!refreshedAgreement,
+                    activationEmailSent: refreshedAgreement?.activationEmailSent ?? false,
+                    shouldSendEmail,
+                    investorId: refreshedAgreement?.investorId,
+                    recipientStatus: recipientStatus,
+                    docuSignStatus: docuSignStatus,
+                    agreementStatus: refreshedAgreement?.status,
+                    agreementDocuSignStatus: refreshedAgreement?.docuSignStatus,
+                    event: event,
+                    recipientStatuses: recipientStatuses.map(s => ({ email: s.email, status: s.status }))
+                });
+            }
         }
 
         // Acknowledge webhook

@@ -68,5 +68,15 @@ router.post(
     investorController.generateSOA
 );
 
+// Get investor agreement document (Admin only)
+router.get(
+    '/:id/agreement/document',
+    authenticate,
+    isAdmin,
+    mongoIdValidation,
+    validate,
+    investorController.getInvestorAgreementDocument
+);
+
 module.exports = router;
 

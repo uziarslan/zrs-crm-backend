@@ -60,7 +60,8 @@ exports.adminLogin = async (req, res, next) => {
                 id: admin._id,
                 name: admin.name,
                 email: admin.email,
-                role: admin.role
+                role: admin.role,
+                designation: admin.designation || null
             }
         });
     } catch (error) {
@@ -242,16 +243,33 @@ exports.verifyOTP = async (req, res, next) => {
  */
 exports.getCurrentUser = async (req, res, next) => {
     try {
+        // Fetch fresh user data from database to get latest designation
+        let freshUser = null;
+        if (req.userRole === 'admin') {
+            freshUser = await Admin.findById(req.user._id);
+        } else if (req.userRole === 'manager') {
+            freshUser = await Manager.findById(req.user._id);
+        } else if (req.userRole === 'investor') {
+            freshUser = await Investor.findById(req.user._id);
+        }
+
+        const userData = {
+            id: req.user._id,
+            name: req.user.name,
+            email: req.user.email,
+            role: req.user.role || req.userRole,
+            status: req.user.status,
+            lastLoginAt: req.user.lastLoginAt
+        };
+
+        // Include designation for admin users
+        if (req.userRole === 'admin' && freshUser) {
+            userData.designation = freshUser.designation || null;
+        }
+
         res.status(200).json({
             success: true,
-            user: {
-                id: req.user._id,
-                name: req.user.name,
-                email: req.user.email,
-                role: req.user.role || req.userRole,
-                status: req.user.status,
-                lastLoginAt: req.user.lastLoginAt
-            }
+            user: userData
         });
     } catch (error) {
         logger.error('Get current user error:', error);

@@ -349,6 +349,153 @@ class DocuSignService {
     }
 
     /**
+     * Create and send Investor Agreement envelope using template
+     * @param {Object} agreementData - Investor agreement data with admin and investor info
+     * @returns {Object} Envelope info
+     */
+    async createInvestorAgreement(agreementData) {
+        try {
+            const {
+                adminName,
+                adminDesignation,
+                adminEmail,
+                investorName,
+                investorEmail,
+                investorEid,
+                decidedPercentageMin,
+                decidedPercentageMax,
+                investmentAmount,
+                date
+            } = agreementData;
+
+            if (!investorEmail || !adminEmail) {
+                throw new Error('Investor email and admin email are required to send DocuSign investor agreement');
+            }
+
+            logger.info('DocuSign createInvestorAgreement called with:', {
+                adminName,
+                adminDesignation,
+                adminEmail,
+                investorName,
+                investorEmail,
+                investorEid,
+                decidedPercentageMin,
+                decidedPercentageMax,
+                investmentAmount,
+                date
+            });
+
+            // Get access token
+            const accessToken = await this.getAccessToken();
+
+            // Create a fresh API client for this request
+            const apiClient = new docusign.ApiClient();
+            const baseUri = process.env.NODE_ENV === 'development'
+                ? 'https://demo.docusign.net'
+                : (process.env.DOCUSIGN_BASE_URI || 'https://demo.docusign.net');
+            apiClient.setBasePath(baseUri + '/restapi');
+            apiClient.addDefaultHeader('Authorization', `Bearer ${accessToken}`);
+
+            const envelopesApi = new docusign.EnvelopesApi(apiClient);
+            const accountId = process.env.DOCUSIGN_ACCOUNT_ID;
+
+            // Create envelope definition using template
+            const envelope = new docusign.EnvelopeDefinition();
+            envelope.emailSubject = `Investor Agreement - ${investorName} - ZRS Cars Trading`;
+            envelope.status = 'sent';
+
+            // Use template ID from environment variables
+            envelope.templateId = process.env.DOCUSIGN_PURCHASE_INVESTMENT_AGREEMENT_TEMPLATE_ID;
+
+            logger.info('DocuSign investor agreement envelope configuration:', {
+                templateId: envelope.templateId,
+                accountId: accountId,
+                basePath: apiClient.getBasePath(),
+                adminEmail: adminEmail,
+                adminName: adminName,
+                investorEmail: investorEmail,
+                investorName: investorName
+            });
+
+            // Validate template ID
+            if (!envelope.templateId) {
+                throw new Error('DOCUSIGN_PURCHASE_INVESTMENT_AGREEMENT_TEMPLATE_ID is not set in environment variables');
+            }
+
+            // Format decided percentage range
+            const formatPercentageRange = (min, max) => {
+                if (typeof min === 'number' && typeof max === 'number') {
+                    if (Math.abs(min - max) < 0.001) {
+                        return `${min}%`;
+                    }
+                    return `${min}% - ${max}%`;
+                }
+                if (typeof min === 'number') {
+                    return `${min}%`;
+                }
+                if (typeof max === 'number') {
+                    return `${max}%`;
+                }
+                return '0%';
+            };
+
+            const decidedPercentage = formatPercentageRange(decidedPercentageMin, decidedPercentageMax);
+            const agreementDate = date ? new Date(date).toLocaleDateString() : new Date().toLocaleDateString();
+
+            // Create template role only for investor (admin is no longer a recipient/signer)
+            const investorRole = new docusign.TemplateRole();
+            investorRole.email = investorEmail;
+            investorRole.name = investorName;
+            investorRole.roleName = 'investor'; // This should match the role name in your DocuSign template
+
+            // Add template variables (custom fields in your DocuSign template)
+            // Include admin fields even though admin is not a recipient - they will populate template fields
+            const fmt = (v) => (v == null || v === '') ? '' : String(v);
+            const investorTabs = [
+                // Admin fields (populated but admin doesn't sign)
+                { tabLabel: 'admin_name', value: fmt(adminName) },
+                { tabLabel: 'designation', value: fmt(adminDesignation) },
+                
+                // Investor fields
+                { tabLabel: 'decided_percentage', value: decidedPercentage },
+                { tabLabel: 'investor_name', value: fmt(investorName) },
+                { tabLabel: 'investor_eid', value: fmt(investorEid) },
+                { tabLabel: 'investment_amount', value: fmt(investmentAmount) },
+                { tabLabel: 'date', value: agreementDate }
+            ];
+
+            investorRole.tabs = { textTabs: investorTabs };
+
+            envelope.templateRoles = [investorRole];
+
+            // Create envelope
+            const result = await envelopesApi.createEnvelope(accountId, { envelopeDefinition: envelope });
+
+            logger.info(`DocuSign Investor Agreement created using template: ${result.envelopeId}`);
+
+            return {
+                envelopeId: result.envelopeId,
+                status: result.status,
+                uri: result.uri
+            };
+        } catch (error) {
+            logger.error('DocuSign create Investor Agreement error:', error);
+            logger.error('Error details:', {
+                message: error.message,
+                status: error.status,
+                response: error.response?.text,
+                agreementData: {
+                    investorEmail: agreementData.investorEmail,
+                    adminEmail: agreementData.adminEmail,
+                    templateId: process.env.DOCUSIGN_PURCHASE_INVESTMENT_AGREEMENT_TEMPLATE_ID
+                }
+            });
+
+            throw new Error('Failed to create Investor Agreement');
+        }
+    }
+
+    /**
      * Create consignment contract envelope
      * @param {Object} contractData - Contract data
      * @returns {Object} Envelope info

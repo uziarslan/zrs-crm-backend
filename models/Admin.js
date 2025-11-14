@@ -38,6 +38,10 @@ const adminSchema = new mongoose.Schema({
         type: String,
         enum: ['PurchaseOrder', 'Sale']
     },
+    designation: {
+        type: String,
+        trim: true
+    },
     lastLoginAt: {
         type: Date
     },
