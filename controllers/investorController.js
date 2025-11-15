@@ -840,5 +840,79 @@ exports.getInvestorAgreementDocument = async (req, res, next) => {
     }
 };
 
+/**
+ * @desc    Resend activation email to investor
+ * @route   POST /api/v1/investors/:id/resend-activation
+ * @access  Private (Admin only)
+ */
+exports.resendActivationEmail = async (req, res, next) => {
+    try {
+        const investorId = req.params.id;
+
+        const investor = await Investor.findById(investorId);
+
+        if (!investor) {
+            return res.status(404).json({
+                success: false,
+                message: 'Investor not found'
+            });
+        }
+
+        if (investor.status !== 'invited') {
+            return res.status(400).json({
+                success: false,
+                message: 'Investor is not in invited status. Only invited investors can receive activation emails.'
+            });
+        }
+
+        // Generate new invite token
+        const inviteToken = generateInviteToken();
+        const inviteTokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days from now
+        investor.inviteToken = inviteToken;
+        investor.inviteTokenExpiry = inviteTokenExpiry;
+        await investor.save();
+
+        const inviteLink = `${process.env.DOMAIN_FRONTEND || process.env.DOMAIN_BACKEND || 'http://localhost:3000'}/invite/${inviteToken}`;
+
+        // Send activation email
+        if (process.env.USER_ACCOUNT_ACTIVATION_ID) {
+            try {
+                await sendMailtrapEmail({
+                    templateUuid: process.env.USER_ACCOUNT_ACTIVATION_ID,
+                    templateVariables: {
+                        name: investor.name,
+                        role: 'Investor',
+                        activation_link: inviteLink,
+                        year: new Date().getFullYear().toString()
+                    },
+                    recipients: [investor.email]
+                });
+
+                logger.info(`✅ Activation email resent to ${investor.email}`);
+
+                res.status(200).json({
+                    success: true,
+                    message: 'Activation email sent successfully'
+                });
+            } catch (emailError) {
+                logger.error(`Failed to send activation email to ${investor.email}:`, emailError);
+                return res.status(500).json({
+                    success: false,
+                    message: 'Failed to send activation email'
+                });
+            }
+        } else {
+            logger.warn('USER_ACCOUNT_ACTIVATION_ID not configured - cannot send activation email');
+            return res.status(500).json({
+                success: false,
+                message: 'Email service not configured'
+            });
+        }
+    } catch (error) {
+        logger.error('Resend activation email error:', error);
+        next(error);
+    }
+};
+
 module.exports = exports;
 

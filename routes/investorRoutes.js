@@ -78,5 +78,15 @@ router.get(
     investorController.getInvestorAgreementDocument
 );
 
+// Resend activation email (Admin only)
+router.post(
+    '/:id/resend-activation',
+    authenticate,
+    isAdmin,
+    mongoIdValidation,
+    validate,
+    investorController.resendActivationEmail
+);
+
 module.exports = router;
 
