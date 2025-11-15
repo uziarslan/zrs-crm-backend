@@ -20,6 +20,9 @@ const integrationRoutes = require('./routes/integrationRoutes');
 
 const app = express();
 
+// Trust proxy for Heroku (fixes rate limiter warnings)
+app.set('trust proxy', 1);
+
 // Connect to MongoDB
 connectDB();
 

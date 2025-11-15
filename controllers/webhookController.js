@@ -57,15 +57,12 @@ exports.docusignWebhook = async (req, res, next) => {
             data = req.body;
         }
 
-        // Debug: Log the complete webhook request
-        logger.info('🔍 COMPLETE WEBHOOK DATA DEBUG:');
-        logger.info('📋 Headers:', JSON.stringify(req.headers, null, 2));
-        logger.info('📋 Raw Body (req.rawBody):', req.rawBody ? req.rawBody.substring(0, 500) + '...' : 'No raw body');
-        logger.info('📋 Parsed Body (req.body):', JSON.stringify(req.body, null, 2));
-        logger.info('📋 Event:', event);
-        logger.info('📋 Data Object:', JSON.stringify(data, null, 2));
-        logger.info('📋 Data Type:', typeof data);
-        logger.info('📋 Data Keys:', data ? Object.keys(data) : 'No data object');
+        // Reduced logging to prevent memory issues
+        logger.info('📋 DocuSign webhook received:', {
+            event: event,
+            hasEnvelopeId: !!(data?.envelopeId || data?.envelopeSummary?.envelopeId),
+            hasStatus: !!(data?.envelopeSummary?.status || data?.status)
+        });
 
         // Verify webhook authenticity (in production, verify HMAC signature)
         // const hmacSignature = req.headers['x-docusign-signature-1'];
@@ -85,23 +82,10 @@ exports.docusignWebhook = async (req, res, next) => {
             data?.envelopeStatus ||
             req.body.status;
 
-        // Debug: Log the raw status values
-        logger.info('🔍 STATUS EXTRACTION DEBUG:');
-        logger.info('📋 Envelope ID:', envelopeId);
-        logger.info('📋 Data Status:', data?.status);
-        logger.info('📋 Envelope Summary Status:', data?.envelopeSummary?.status);
-        logger.info('📋 Final Status:', status);
-        logger.info('📋 Event:', event);
-        logger.info('📋 Data Envelope ID:', data?.envelopeId);
-        logger.info('📋 Data Envelope Summary ID:', data?.envelopeSummary?.envelopeId);
-
-        logger.info('DocuSign webhook processing:', {
+        logger.info('📋 DocuSign webhook processing:', {
             envelopeId,
-            status,
-            event,
-            envelopeStatus: data?.envelopeSummary?.status,
-            recipientStatus: data?.envelopeSummary?.recipients?.signers?.map(s => ({ email: s.email, status: s.status })),
-            recipientCount: data?.envelopeSummary?.recipients?.signers?.length || 0
+            status: status || data?.envelopeSummary?.status || data?.status,
+            event
         });
 
         if (!envelopeId) {
@@ -137,29 +121,12 @@ exports.docusignWebhook = async (req, res, next) => {
                 .populate('createdBy');
         }
 
-        logger.info('Webhook lookup:', {
+        logger.info('📋 Webhook lookup:', {
             envelopeId,
             investorAgreementFound: !!investorAgreement,
             purchaseOrderFound: !!po,
-            leadFound: !!lead,
-            leadId: lead?.leadId,
-            docuSignStatus: po?.docuSignStatus
+            leadFound: !!lead
         });
-
-        // Debug: Log the full webhook data structure
-        logger.info('🔍 WEBHOOK DATA STRUCTURE DEBUG:');
-        logger.info('📋 Envelope ID:', envelopeId);
-        logger.info('📋 Status:', status);
-        logger.info('📋 Event:', event);
-        logger.info('📋 Envelope Summary Status:', data?.envelopeSummary?.status);
-        logger.info('📋 Recipient Count:', data?.envelopeSummary?.recipients?.signers?.length || 0);
-        logger.info('📋 Recipient Statuses:', data?.envelopeSummary?.recipients?.signers?.map(s => ({
-            email: s.email,
-            status: s.status,
-            name: s.name
-        })));
-        logger.info('📋 Full Envelope Summary:', JSON.stringify(data?.envelopeSummary, null, 2));
-        logger.info('📋 Full Recipients:', JSON.stringify(data?.envelopeSummary?.recipients, null, 2));
 
         if (po && lead) {
             // Handle Lead Purchase Agreement signing - only update DocuSign status
@@ -308,20 +275,14 @@ exports.docusignWebhook = async (req, res, next) => {
             // Also check if the event indicates completion
             const isCompletionEvent = event === 'envelope-completed' || event === 'envelope-signed' || event === 'envelope-delivered';
 
-            logger.info('🔍 STATUS PROCESSING DEBUG:');
-            logger.info('📋 Envelope ID:', envelopeId);
-            logger.info('📋 Lead ID:', lead.leadId);
-            logger.info('📋 Current Status:', lead.docuSign?.status);
-            logger.info('📋 Incoming Status:', docuSignStatus);
-            logger.info('📋 Has Completed Recipient:', hasCompletedRecipient);
-            logger.info('📋 Is Completion Event:', isCompletionEvent);
-            logger.info('📋 Event:', event);
-            logger.info('📋 Recipient Statuses:', data?.envelopeSummary?.recipients?.signers?.map(s => s.status));
-            logger.info('📋 Status Detection Logic:');
-            logger.info('   - docuSignStatus === "completed":', docuSignStatus === 'completed');
-            logger.info('   - hasCompletedRecipient:', hasCompletedRecipient);
-            logger.info('   - isCompletionEvent:', isCompletionEvent);
-            logger.info('   - Will Update to Completed:', (docuSignStatus === 'completed' || hasCompletedRecipient || isCompletionEvent));
+            logger.info('📋 PO status processing:', {
+                envelopeId,
+                leadId: lead.leadId,
+                currentStatus: lead.docuSign?.status,
+                incomingStatus: docuSignStatus,
+                event,
+                willMarkCompleted: (docuSignStatus === 'completed' || hasCompletedRecipient || isCompletionEvent)
+            });
 
             // Check for envelope deletion first (highest priority)
             if (event === 'envelope-deleted') {
@@ -349,73 +310,7 @@ exports.docusignWebhook = async (req, res, next) => {
                 applyStatusToMatching('completed');
                 po.docuSignStatus = 'completed';
                 po.docuSignSignedAt = new Date();
-
-                // Fetch and store the signed documents with base64 validation
-                try {
-                    logger.info(`Fetching signed documents for envelope ${envelopeId}`);
-                    const signedDocuments = await docusignService.getSignedDocuments(envelopeId);
-
-                    if (signedDocuments && signedDocuments.length > 0) {
-                        // Validate and filter documents with valid base64 PDF content
-                        const validDocuments = [];
-                        const investorIdForDoc = matchingEnvelope?.investorId || (matchingAllocation?.investorId?._id || matchingAllocation?.investorId);
-                        for (const doc of signedDocuments) {
-                            if (!doc.content || typeof doc.content !== 'string') {
-                                logger.warn(`Document ${doc.documentId} (${doc.name}) has no content or invalid content type`);
-                                continue;
-                            }
-
-                            // Validate base64 format and decode to check PDF header
-                            try {
-                                const cleanedBase64 = doc.content.replace(/^data:application\/pdf;base64,/, '');
-                                const buffer = Buffer.from(cleanedBase64, 'base64');
-
-                                // Check if decoded content starts with PDF magic number
-                                if (buffer.length < 4 || buffer.slice(0, 4).toString() !== '%PDF') {
-                                    logger.error(`Document ${doc.documentId} (${doc.name}) does not appear to be a valid PDF (missing %PDF header)`);
-                                    continue;
-                                }
-
-                                validDocuments.push({
-                                    documentId: doc.documentId,
-                                    name: doc.name,
-                                    fileType: doc.fileType || 'application/pdf',
-                                    fileSize: doc.fileSize || buffer.length,
-                                    content: cleanedBase64, // Store clean base64 without data URI prefix
-                                    uri: doc.uri,
-                                    sourceEnvelopeId: envelopeId,
-                                    investorId: investorIdForDoc
-                                });
-
-                                logger.info(`✅ Validated and storing document ${doc.documentId}:`, {
-                                    name: doc.name,
-                                    contentLength: cleanedBase64.length,
-                                    pdfSize: buffer.length,
-                                    isValidPdf: true
-                                });
-                            } catch (validationError) {
-                                logger.error(`Failed to validate document ${doc.documentId} (${doc.name}):`, validationError);
-                                continue;
-                            }
-                        }
-
-                        if (validDocuments.length > 0) {
-                            const existingDocuments = Array.isArray(po.docuSignDocuments) ? po.docuSignDocuments : [];
-                            const filtered = existingDocuments.filter(existing => !(existing.sourceEnvelopeId === envelopeId && validDocuments.some(doc => doc.documentId === existing.documentId)));
-                            po.docuSignDocuments = [...filtered, ...validDocuments];
-                            logger.info(`✅ Stored ${validDocuments.length} validated signed documents for lead ${lead.leadId}`);
-                        } else {
-                            logger.warn(`No valid documents found after validation for envelope ${envelopeId}`);
-                        }
-                    } else {
-                        logger.warn(`No signed documents found for envelope ${envelopeId}`);
-                    }
-                } catch (docError) {
-                    logger.error(`Error fetching signed documents for envelope ${envelopeId}:`, docError);
-                    // Don't fail the webhook if document fetching fails
-                }
-
-                logger.info(`Lead ${lead.leadId} Purchase Agreement signed by investor`);
+                logger.info(`Lead ${lead.leadId} Purchase Agreement marked as completed`);
             } else {
                 // Update with valid status
                 applyStatusToMatching(docuSignStatus);
@@ -433,21 +328,16 @@ exports.docusignWebhook = async (req, res, next) => {
             aggregateStatuses();
             await po.save();
             await lead.save();
-            logger.info('🔍 DATABASE UPDATE DEBUG:');
-            logger.info('📋 Lead ID:', lead.leadId);
-            logger.info('📋 New Status:', po.docuSignStatus);
-            logger.info('📋 Signed At:', po.docuSignSignedAt);
-            logger.info('📋 Database Update: SUCCESS');
+            logger.info(`✅ PO ${po.poId} status updated to: ${po.docuSignStatus}`);
+
+            // Queue document fetching asynchronously if completed
+            if (docuSignStatus === 'completed' || hasCompletedRecipient || isCompletionEvent) {
+                fetchPODocumentsAsync(envelopeId, po._id, lead._id, matchingEnvelope?.investorId || (matchingAllocation?.investorId?._id || matchingAllocation?.investorId)).catch(err => {
+                    logger.error(`Error fetching PO documents asynchronously for ${envelopeId}:`, err);
+                });
+            }
         } else {
-            logger.info('🔍 NO MATCHING RECORD DEBUG:');
-            logger.info('📋 Envelope ID:', envelopeId);
-            logger.info('📋 Lead Found:', false);
-            logger.info('📋 PO Found:', !!po);
-            logger.info('📋 Searching for Lead with envelope ID:', envelopeId);
-            logger.info('📋 This might indicate:');
-            logger.info('   - Envelope ID mismatch');
-            logger.info('   - Lead not found in database');
-            logger.info('   - Different envelope ID format');
+            logger.info(`📋 No matching record for envelope ${envelopeId}`);
         }
 
         if (po && !lead) {
@@ -526,19 +416,14 @@ exports.docusignWebhook = async (req, res, next) => {
                 isEnvelopeCompleted ||
                 (isEnvelopeCompletedEvent && docuSignStatus === 'completed');
 
-            logger.info('🔍 INVESTOR AGREEMENT STATUS PROCESSING:');
-            logger.info('📋 Envelope ID:', envelopeId);
-            logger.info('📋 Investor Agreement ID:', investorAgreement._id);
-            logger.info('📋 Current Status:', investorAgreement.docuSignStatus);
-            logger.info('📋 Incoming Status:', docuSignStatus);
-            logger.info('📋 Event:', event);
-            logger.info('📋 Recipient Status:', recipientStatus);
-            logger.info('📋 Has Signed Recipient:', hasSignedRecipient);
-            logger.info('📋 Is Recipient Completed Event:', isRecipientCompletedEvent);
-            logger.info('📋 Is Envelope Completed Event:', isEnvelopeCompletedEvent);
-            logger.info('📋 Is Completion Event:', isCompletionEvent);
-            logger.info('📋 Should Mark As Completed:', shouldMarkAsCompleted);
-            logger.info('📋 All Recipient Statuses:', recipientStatuses.map(s => ({ email: s.email, status: s.status })));
+            logger.info('📋 Investor Agreement status processing:', {
+                envelopeId,
+                agreementId: investorAgreement._id,
+                currentStatus: investorAgreement.docuSignStatus,
+                incomingStatus: docuSignStatus,
+                event,
+                shouldMarkCompleted: shouldMarkAsCompleted
+            });
 
             if (event === 'envelope-deleted' || docuSignStatus === 'declined' || docuSignStatus === 'voided') {
                 investorAgreement.docuSignStatus = docuSignStatus;
@@ -550,60 +435,23 @@ exports.docusignWebhook = async (req, res, next) => {
                 investorAgreement.status = 'completed';
                 investorAgreement.completedAt = new Date();
 
-                // Fetch and store the signed documents
-                try {
-                    logger.info(`Fetching signed documents for Investor Agreement envelope ${envelopeId}`);
-                    const signedDocuments = await docusignService.getSignedDocuments(envelopeId);
-
-                    if (signedDocuments && signedDocuments.length > 0) {
-                        const validDocuments = [];
-                        for (const doc of signedDocuments) {
-                            if (!doc.content || typeof doc.content !== 'string') {
-                                logger.warn(`Document ${doc.documentId} (${doc.name}) has no content or invalid content type`);
-                                continue;
-                            }
-
-                            try {
-                                const cleanedBase64 = doc.content.replace(/^data:application\/pdf;base64,/, '');
-                                const buffer = Buffer.from(cleanedBase64, 'base64');
-
-                                if (buffer.length < 4 || buffer.slice(0, 4).toString() !== '%PDF') {
-                                    logger.error(`Document ${doc.documentId} (${doc.name}) does not appear to be a valid PDF`);
-                                    continue;
-                                }
-
-                                validDocuments.push({
-                                    documentId: doc.documentId,
-                                    name: doc.name,
-                                    fileType: doc.fileType || 'application/pdf',
-                                    fileSize: doc.fileSize || buffer.length,
-                                    content: cleanedBase64,
-                                    uri: doc.uri
-                                });
-
-                                logger.info(`✅ Validated and storing Investor Agreement document ${doc.documentId}:`, {
-                                    name: doc.name,
-                                    contentLength: cleanedBase64.length,
-                                    pdfSize: buffer.length
-                                });
-                            } catch (validationError) {
-                                logger.error(`Failed to validate Investor Agreement document ${doc.documentId}:`, validationError);
-                                continue;
-                            }
-                        }
-
-                        if (validDocuments.length > 0) {
-                            investorAgreement.signedDocuments = validDocuments;
-                            logger.info(`✅ Stored ${validDocuments.length} validated signed documents for Investor Agreement ${investorAgreement._id}`);
-                        }
-                    }
-                } catch (docError) {
-                    logger.error(`Error fetching signed documents for Investor Agreement envelope ${envelopeId}:`, docError);
-                }
-
+                // Save status immediately, fetch documents asynchronously
                 await investorAgreement.save();
+                logger.info(`✅ Investor Agreement ${investorAgreement._id} marked as completed`);
 
-                logger.info(`✅ Investor Agreement ${investorAgreement._id} completed`);
+                // Queue document fetching and email sending asynchronously
+                processInvestorAgreementAsync(
+                    envelopeId,
+                    investorAgreement._id,
+                    event,
+                    data,
+                    recipientStatus,
+                    docuSignStatus,
+                    recipientStatuses,
+                    investorAgreement
+                ).catch(err => {
+                    logger.error(`Error processing investor agreement asynchronously for ${envelopeId}:`, err);
+                });
             } else {
                 // Update with valid status - but don't mark as completed unless actually signed
                 // Handle intermediate statuses like 'delivered' (document was delivered but not signed yet)
@@ -651,135 +499,217 @@ exports.docusignWebhook = async (req, res, next) => {
                 }
             }
 
-            // Send activation email when investor signs (check after all status updates)
-            // Reload agreement to get latest state after save
-            const refreshedAgreement = await InvestorAgreement.findById(investorAgreement._id);
-            if (!refreshedAgreement) {
-                logger.error(`Investor Agreement ${investorAgreement._id} not found after save`);
-                return res.status(200).json({ success: true, message: 'Webhook processed' });
-            }
-
-            // Check if recipient has signed - use multiple ways to detect signing
-            // Priority: event type > recipient status > envelope status > agreement status
-            const recipientHasSigned = event === 'recipient-completed' ||
-                event === 'envelope-completed' ||
-                event === 'envelope-signed' ||
-                recipientStatus === 'completed' ||
-                recipientStatus === 'signed' ||
-                docuSignStatus === 'completed' ||
-                refreshedAgreement.docuSignStatus === 'completed' ||
-                refreshedAgreement.status === 'completed' ||
-                (recipientStatuses.length > 0 && recipientStatuses.some(s => {
-                    const signerEmail = (s.email || '').toLowerCase().trim();
-                    const investorEmail = (investorAgreement.agreementData?.investorEmail || '').toLowerCase().trim();
-                    const signerStatus = (s.status || '').toLowerCase();
-                    return (signerStatus === 'completed' || signerStatus === 'signed') &&
-                        signerEmail === investorEmail &&
-                        signerEmail !== '';
-                }));
-
-            // Check if email should be sent (recipient signed AND email not yet sent)
-            const shouldSendEmail = recipientHasSigned &&
-                !refreshedAgreement.activationEmailSent &&
-                refreshedAgreement.investorId;
-
-            if (shouldSendEmail) {
-                try {
-                    const investor = await Investor.findById(refreshedAgreement.investorId._id || refreshedAgreement.investorId);
-
-                    logger.info('🔍 CHECKING ACTIVATION EMAIL:', {
-                        envelopeId,
-                        investorId: refreshedAgreement.investorId,
-                        investorFound: !!investor,
-                        investorStatus: investor?.status,
-                        activationEmailSent: refreshedAgreement.activationEmailSent,
-                        recipientStatus: recipientStatus,
-                        docuSignStatus: docuSignStatus,
-                        event: event,
-                        recipientHasSigned: recipientHasSigned,
-                        allRecipients: recipientStatuses.map(s => ({ email: s.email, status: s.status }))
-                    });
-
-                    if (investor && investor.status === 'invited') {
-                        // Always generate a fresh invite token when agreement is signed
-                        // This ensures the token is not expired when the investor receives the email
-                        const inviteToken = generateInviteToken();
-                        const inviteTokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days from now
-                        investor.inviteToken = inviteToken;
-                        investor.inviteTokenExpiry = inviteTokenExpiry;
-                        await investor.save();
-                        logger.info(`✅ Generated fresh invite token for investor ${investor.email} (expires: ${inviteTokenExpiry.toISOString()})`);
-
-                        const inviteLink = `${process.env.DOMAIN_FRONTEND || process.env.DOMAIN_BACKEND || 'http://localhost:3000'}/invite/${inviteToken}`;
-
-                        // Send activation email
-                        if (process.env.USER_ACCOUNT_ACTIVATION_ID) {
-                            try {
-                                await sendMailtrapEmail({
-                                    templateUuid: process.env.USER_ACCOUNT_ACTIVATION_ID,
-                                    templateVariables: {
-                                        name: investor.name,
-                                        role: 'Investor',
-                                        activation_link: inviteLink,
-                                        year: new Date().getFullYear().toString()
-                                    },
-                                    recipients: [investor.email]
-                                });
-
-                                // Mark email as sent
-                                refreshedAgreement.activationEmailSent = true;
-                                refreshedAgreement.activationEmailSentAt = new Date();
-                                await refreshedAgreement.save();
-
-                                logger.info(`✅ Activation email sent to ${investor.email} after Investor Agreement signing`);
-                                logger.info(`✅ Activation email flag set for agreement ${refreshedAgreement._id}`);
-                            } catch (emailError) {
-                                logger.error(`Failed to send activation email to ${investor.email} after agreement signing:`, emailError);
-                                logger.error('Email error details:', {
-                                    message: emailError.message,
-                                    stack: emailError.stack,
-                                    templateUuid: process.env.USER_ACCOUNT_ACTIVATION_ID,
-                                    investorEmail: investor.email
-                                });
-                            }
-                        } else {
-                            logger.warn('USER_ACCOUNT_ACTIVATION_ID not configured - cannot send activation email');
-                        }
-                    } else {
-                        logger.info(`Skipping activation email - investor status: ${investor?.status || 'not found'}, email already sent: ${refreshedAgreement.activationEmailSent}`);
-                    }
-                } catch (emailCheckError) {
-                    logger.error(`Error checking/sending activation email for investor agreement ${refreshedAgreement._id}:`, emailCheckError);
-                    logger.error('Email check error details:', {
-                        message: emailCheckError.message,
-                        stack: emailCheckError.stack
-                    });
-                }
-            } else {
-                logger.info('🔍 ACTIVATION EMAIL CHECK SKIPPED:', {
-                    recipientHasSigned,
-                    agreementExists: !!refreshedAgreement,
-                    activationEmailSent: refreshedAgreement?.activationEmailSent ?? false,
-                    shouldSendEmail,
-                    investorId: refreshedAgreement?.investorId,
-                    recipientStatus: recipientStatus,
-                    docuSignStatus: docuSignStatus,
-                    agreementStatus: refreshedAgreement?.status,
-                    agreementDocuSignStatus: refreshedAgreement?.docuSignStatus,
-                    event: event,
-                    recipientStatuses: recipientStatuses.map(s => ({ email: s.email, status: s.status }))
-                });
-            }
         }
 
-        // Acknowledge webhook
-        res.status(200).json({ success: true, message: 'Webhook processed' });
+        // Acknowledge webhook immediately (within 1-2 seconds)
+        res.status(200).json({ success: true, message: 'Webhook received' });
     } catch (error) {
         logger.error('DocuSign webhook error:', error);
         // Return 200 to prevent DocuSign from retrying
-        res.status(200).json({ success: false, message: 'Error processing webhook' });
+        if (!res.headersSent) {
+            res.status(200).json({ success: false, message: 'Error processing webhook' });
+        }
     }
 };
+
+/**
+ * Fetch and store PO documents asynchronously (runs after webhook response)
+ */
+async function fetchPODocumentsAsync(envelopeId, poId, leadId, investorId) {
+    try {
+        logger.info(`📥 Fetching signed documents for PO envelope ${envelopeId}`);
+        const signedDocuments = await docusignService.getSignedDocuments(envelopeId);
+
+        if (signedDocuments && signedDocuments.length > 0) {
+            const validDocuments = [];
+            for (const doc of signedDocuments) {
+                if (!doc.content || typeof doc.content !== 'string') {
+                    logger.warn(`Document ${doc.documentId} (${doc.name}) has no content or invalid content type`);
+                    continue;
+                }
+
+                try {
+                    const cleanedBase64 = doc.content.replace(/^data:application\/pdf;base64,/, '');
+                    const buffer = Buffer.from(cleanedBase64, 'base64');
+
+                    if (buffer.length < 4 || buffer.slice(0, 4).toString() !== '%PDF') {
+                        logger.error(`Document ${doc.documentId} (${doc.name}) does not appear to be a valid PDF`);
+                        continue;
+                    }
+
+                    validDocuments.push({
+                        documentId: doc.documentId,
+                        name: doc.name,
+                        fileType: doc.fileType || 'application/pdf',
+                        fileSize: doc.fileSize || buffer.length,
+                        content: cleanedBase64,
+                        uri: doc.uri,
+                        sourceEnvelopeId: envelopeId,
+                        investorId: investorId
+                    });
+                } catch (validationError) {
+                    logger.error(`Failed to validate document ${doc.documentId} (${doc.name}):`, validationError);
+                    continue;
+                }
+            }
+
+            if (validDocuments.length > 0) {
+                const po = await PurchaseOrder.findById(poId);
+                if (po) {
+                    const existingDocuments = Array.isArray(po.docuSignDocuments) ? po.docuSignDocuments : [];
+                    const filtered = existingDocuments.filter(existing =>
+                        !(existing.sourceEnvelopeId === envelopeId &&
+                            validDocuments.some(doc => doc.documentId === existing.documentId))
+                    );
+                    po.docuSignDocuments = [...filtered, ...validDocuments];
+                    await po.save();
+                    logger.info(`✅ Stored ${validDocuments.length} documents for PO ${po.poId}`);
+                }
+            }
+        }
+    } catch (error) {
+        logger.error(`Error fetching PO documents for envelope ${envelopeId}:`, error);
+    }
+}
+
+/**
+ * Process investor agreement asynchronously (document fetching + email sending)
+ * Runs after webhook response to prevent memory issues and timeouts
+ */
+async function processInvestorAgreementAsync(
+    envelopeId,
+    agreementId,
+    event,
+    data,
+    recipientStatus,
+    docuSignStatus,
+    recipientStatuses,
+    investorAgreement
+) {
+    try {
+        // Fetch and store signed documents
+        logger.info(`📥 Fetching signed documents for Investor Agreement envelope ${envelopeId}`);
+        const signedDocuments = await docusignService.getSignedDocuments(envelopeId);
+
+        if (signedDocuments && signedDocuments.length > 0) {
+            const validDocuments = [];
+            for (const doc of signedDocuments) {
+                if (!doc.content || typeof doc.content !== 'string') {
+                    logger.warn(`Document ${doc.documentId} (${doc.name}) has no content or invalid content type`);
+                    continue;
+                }
+
+                try {
+                    const cleanedBase64 = doc.content.replace(/^data:application\/pdf;base64,/, '');
+                    const buffer = Buffer.from(cleanedBase64, 'base64');
+
+                    if (buffer.length < 4 || buffer.slice(0, 4).toString() !== '%PDF') {
+                        logger.error(`Document ${doc.documentId} (${doc.name}) does not appear to be a valid PDF`);
+                        continue;
+                    }
+
+                    validDocuments.push({
+                        documentId: doc.documentId,
+                        name: doc.name,
+                        fileType: doc.fileType || 'application/pdf',
+                        fileSize: doc.fileSize || buffer.length,
+                        content: cleanedBase64,
+                        uri: doc.uri
+                    });
+                } catch (validationError) {
+                    logger.error(`Failed to validate Investor Agreement document ${doc.documentId}:`, validationError);
+                    continue;
+                }
+            }
+
+            if (validDocuments.length > 0) {
+                const agreement = await InvestorAgreement.findById(agreementId);
+                if (agreement) {
+                    agreement.signedDocuments = validDocuments;
+                    await agreement.save();
+                    logger.info(`✅ Stored ${validDocuments.length} documents for Investor Agreement ${agreementId}`);
+                }
+            }
+        }
+
+        // Reload agreement to get latest state
+        const refreshedAgreement = await InvestorAgreement.findById(agreementId);
+        if (!refreshedAgreement) {
+            logger.error(`Investor Agreement ${agreementId} not found after document fetch`);
+            return;
+        }
+
+        // Check if recipient has signed - use multiple ways to detect signing
+        const recipientHasSigned = event === 'recipient-completed' ||
+            event === 'envelope-completed' ||
+            event === 'envelope-signed' ||
+            recipientStatus === 'completed' ||
+            recipientStatus === 'signed' ||
+            docuSignStatus === 'completed' ||
+            refreshedAgreement.docuSignStatus === 'completed' ||
+            refreshedAgreement.status === 'completed' ||
+            (recipientStatuses.length > 0 && recipientStatuses.some(s => {
+                const signerEmail = (s.email || '').toLowerCase().trim();
+                const investorEmail = (investorAgreement.agreementData?.investorEmail || '').toLowerCase().trim();
+                const signerStatus = (s.status || '').toLowerCase();
+                return (signerStatus === 'completed' || signerStatus === 'signed') &&
+                    signerEmail === investorEmail &&
+                    signerEmail !== '';
+            }));
+
+        // Check if email should be sent
+        const shouldSendEmail = recipientHasSigned &&
+            !refreshedAgreement.activationEmailSent &&
+            refreshedAgreement.investorId;
+
+        if (shouldSendEmail) {
+            try {
+                const investor = await Investor.findById(refreshedAgreement.investorId._id || refreshedAgreement.investorId);
+
+                if (investor && investor.status === 'invited') {
+                    // Generate fresh invite token
+                    const inviteToken = generateInviteToken();
+                    const inviteTokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+                    investor.inviteToken = inviteToken;
+                    investor.inviteTokenExpiry = inviteTokenExpiry;
+                    await investor.save();
+                    logger.info(`✅ Generated fresh invite token for investor ${investor.email}`);
+
+                    const inviteLink = `${process.env.DOMAIN_FRONTEND || process.env.DOMAIN_BACKEND || 'http://localhost:3000'}/invite/${inviteToken}`;
+
+                    // Send activation email
+                    if (process.env.USER_ACCOUNT_ACTIVATION_ID) {
+                        try {
+                            await sendMailtrapEmail({
+                                templateUuid: process.env.USER_ACCOUNT_ACTIVATION_ID,
+                                templateVariables: {
+                                    name: investor.name,
+                                    role: 'Investor',
+                                    activation_link: inviteLink,
+                                    year: new Date().getFullYear().toString()
+                                },
+                                recipients: [investor.email]
+                            });
+
+                            // Mark email as sent
+                            refreshedAgreement.activationEmailSent = true;
+                            refreshedAgreement.activationEmailSentAt = new Date();
+                            await refreshedAgreement.save();
+
+                            logger.info(`✅ Activation email sent to ${investor.email} after Investor Agreement signing`);
+                        } catch (emailError) {
+                            logger.error(`Failed to send activation email to ${investor.email}:`, emailError);
+                        }
+                    }
+                }
+            } catch (emailCheckError) {
+                logger.error(`Error sending activation email for agreement ${agreementId}:`, emailCheckError);
+            }
+        }
+    } catch (error) {
+        logger.error(`Error processing investor agreement for envelope ${envelopeId}:`, error);
+    }
+}
 
 /**
  * @desc    QuickBooks webhook handler (if applicable)
