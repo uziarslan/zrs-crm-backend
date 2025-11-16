@@ -980,6 +980,10 @@ exports.markVehicleAsReady = async (req, res, next) => {
         }
 
         // Update lead status so this car moves out of inventory into "sale"
+        // Preserve and explicitly mark consignment leads as type 'consignment'
+        if (lead.status === 'consignment') {
+            lead.type = 'consignment';
+        }
         lead.status = 'sale';
         await lead.save();
 

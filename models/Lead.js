@@ -7,7 +7,7 @@ const leadSchema = new mongoose.Schema({
     },
     type: {
         type: String,
-        enum: ['purchase', 'sales'],
+        enum: ['purchase', 'consignment'],
         required: true
     },
     source: {

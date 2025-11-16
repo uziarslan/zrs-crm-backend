@@ -55,7 +55,7 @@ exports.getSalesLeads = async (req, res, next) => {
         // - Dedicated sales leads (type: 'sales')
         // - Purchase leads that have been moved to Sales (type: 'purchase', status: 'sale')
         const baseOrConditions = [
-            { type: 'sales' },
+            { type: 'consignment', status: 'sale' },
             { type: 'purchase', status: 'sale' }
         ];
 
