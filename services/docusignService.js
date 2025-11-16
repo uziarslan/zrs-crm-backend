@@ -494,6 +494,12 @@ class DocuSignService {
             };
 
             const decidedPercentage = formatPercentageRange(decidedPercentageMin, decidedPercentageMax);
+            const formattedInvestmentAmount = (() => {
+                if (investmentAmount == null || investmentAmount === '') return '';
+                const num = Number(investmentAmount);
+                if (!Number.isFinite(num)) return String(investmentAmount);
+                return num.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+            })();
             const agreementDate = date ? new Date(date).toLocaleDateString() : new Date().toLocaleDateString();
 
             // Create template role only for investor (admin is no longer a recipient/signer)
@@ -514,7 +520,7 @@ class DocuSignService {
                 { tabLabel: 'decided_percentage', value: decidedPercentage },
                 { tabLabel: 'investor_name', value: fmt(investorName) },
                 { tabLabel: 'investor_eid', value: fmt(investorEid) },
-                { tabLabel: 'investment_amount', value: fmt(investmentAmount) },
+                { tabLabel: 'investment_amount', value: fmt(formattedInvestmentAmount) },
                 { tabLabel: 'date', value: agreementDate }
             ];
 

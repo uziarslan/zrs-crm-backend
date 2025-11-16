@@ -349,7 +349,7 @@ exports.getLeadById = async (req, res, next) => {
                     select: 'name email'
                 }
             })
-            .populate('invoice')
+            .populate('invoices')
             .populate('investorAllocations.investorId', 'name email decidedPercentageMin decidedPercentageMax creditLimit utilizedAmount');
 
         if (!lead) {
@@ -724,6 +724,7 @@ exports.getVehicleById = async (req, res, next) => {
         const lead = await Lead.findById(req.params.id)
             .populate('createdBy', 'name email')
             .populate('investorAllocations.investorId', 'name email')
+            .populate('notes.addedBy', 'name email')
             .populate({
                 path: 'purchaseOrder',
                 populate: {
@@ -731,7 +732,7 @@ exports.getVehicleById = async (req, res, next) => {
                     select: 'name email'
                 }
             })
-            .populate('invoice');
+            .populate('invoices');
 
         if (!lead || (lead.status !== 'inventory' && lead.status !== 'consignment')) {
             return res.status(404).json({
@@ -788,14 +789,15 @@ exports.getVehicleById = async (req, res, next) => {
             askingPrice: lead.vehicleInfo?.askingPrice,
             minSellingPrice: lead.priceAnalysis?.minSellingPrice,
             maxSellingPrice: lead.priceAnalysis?.maxSellingPrice,
+            jobCosting: lead.jobCosting || {},
             attachments: lead.attachments || [],
             contactInfo: lead.contactInfo || {},
             investor: investorSummary,
             investorAllocation: lead.purchaseOrder?.investorAllocations || [],
             purchaseOrder: lead.purchaseOrder,
-            invoice: lead.invoice, // Keep for backward compatibility
-            invoices: allInvoices, // Add all invoices array
+            invoices: allInvoices, // All invoices for this purchase
             operationalChecklist: lead.operationalChecklist || {},
+            notes: lead.notes || [],
             createdBy: lead.createdBy,
             createdAt: lead.createdAt,
             updatedAt: lead.updatedAt
@@ -844,6 +846,21 @@ exports.getInventory = async (req, res, next) => {
             .populate('createdBy', 'name email')
             .sort({ createdAt: -1 });
 
+        // Preload invoices for all leads in inventory (one query, grouped by leadId)
+        const Invoice = require('../models/Invoice');
+        const leadIds = inventory.map(lead => lead._id);
+        const allInvoices = await Invoice.find({ leadId: { $in: leadIds } });
+
+        const invoicesByLeadId = new Map();
+        allInvoices.forEach(inv => {
+            const key = inv.leadId?.toString();
+            if (!key) return;
+            if (!invoicesByLeadId.has(key)) {
+                invoicesByLeadId.set(key, []);
+            }
+            invoicesByLeadId.get(key).push(inv);
+        });
+
         // Transform leads to match expected format
         const transformedInventory = inventory.map(lead => {
             const allocationSource = Array.isArray(lead.investorAllocations) ? lead.investorAllocations : [];
@@ -856,6 +873,35 @@ exports.getInventory = async (req, res, next) => {
                     email: investorDoc.email
                 }
                 : null;
+
+            // Financial checklist based on job costing + invoice evidence
+            const jobCosting = lead.jobCosting || {};
+            const requiredCostTypes = [];
+            if (jobCosting.transferCost > 0) requiredCostTypes.push('transferCost');
+            if (jobCosting.detailing_inspection_cost > 0) requiredCostTypes.push('detailingInspectionCost');
+            if (jobCosting.agent_commision > 0) requiredCostTypes.push('agentCommission');
+            if (jobCosting.car_recovery_cost > 0) requiredCostTypes.push('carRecoveryCost');
+            if (jobCosting.other_charges > 0) requiredCostTypes.push('otherCharges');
+
+            const leadInvoices = invoicesByLeadId.get(lead._id.toString()) || [];
+            let financialCompletedItems = 0;
+
+            if (requiredCostTypes.length > 0 && leadInvoices.length > 0) {
+                requiredCostTypes.forEach(costType => {
+                    const hasEvidenceForCost = leadInvoices.some(inv => {
+                        const evidence = inv.costInvoiceEvidence && inv.costInvoiceEvidence[costType];
+                        return !!(evidence && evidence.url);
+                    });
+                    if (hasEvidenceForCost) {
+                        financialCompletedItems += 1;
+                    }
+                });
+            }
+
+            const financialChecklist = {
+                totalItems: requiredCostTypes.length,
+                completedItems: financialCompletedItems
+            };
 
             return {
                 _id: lead._id,
@@ -874,8 +920,10 @@ exports.getInventory = async (req, res, next) => {
                 askingPrice: lead.vehicleInfo?.askingPrice,
                 minSellingPrice: lead.priceAnalysis?.minSellingPrice,
                 maxSellingPrice: lead.priceAnalysis?.maxSellingPrice,
+                jobCosting: lead.jobCosting || {},
                 attachments: lead.attachments || [],
                 operationalChecklist: lead.operationalChecklist || {},
+                financialChecklist,
                 investor: investorSummary,
                 createdBy: lead.createdBy,
                 createdAt: lead.createdAt,
@@ -901,47 +949,71 @@ exports.getInventory = async (req, res, next) => {
  */
 exports.markVehicleAsReady = async (req, res, next) => {
     try {
-        const vehicle = await Vehicle.findById(req.params.id)
-            .populate('investorAllocation.investorId', 'name email');
+        const { id } = req.params;
 
-        if (!vehicle) {
+        // New implementation: treat inventory "vehicle" as a purchase Lead
+        const lead = await Lead.findById(id)
+            .populate('investorAllocations.investorId', 'name email');
+
+        if (!lead || (lead.status !== 'inventory' && lead.status !== 'consignment')) {
             return res.status(404).json({
                 success: false,
-                message: 'Vehicle not found'
+                message: 'Inventory vehicle not found'
             });
         }
 
-        // Check if checklist is complete
-        if (!vehicle.isOperationalChecklistComplete()) {
+        // Basic server-side checklist validation (operational only).
+        // Frontend already enforces full progress (operational + financial),
+        // so we keep this lightweight to avoid blocking UX.
+        const validItems = ['detailing', 'photoshoot', 'photoshootEdited', 'metaAds', 'onlineAds', 'instagram'];
+        const checklist = lead.operationalChecklist || {};
+        const allCompleted = validItems.every((item) => {
+            const itemData = checklist[item];
+            return itemData && (itemData.completed === true || itemData.completed === 'true');
+        });
+
+        if (!allCompleted) {
             return res.status(400).json({
                 success: false,
                 message: 'All operational checklist items must be completed before marking as ready for sale'
             });
         }
 
-        // Update vehicle status
-        vehicle.status = 'ready_for_sale';
-        await vehicle.save();
+        // Update lead status so this car moves out of inventory into "sale"
+        lead.status = 'sale';
+        await lead.save();
 
-        // Update investor SOA and recent investments
-        if (vehicle.investorAllocation && vehicle.investorAllocation.length > 0) {
-            for (const allocation of vehicle.investorAllocation) {
-                if (allocation.investorId) {
-                    // Update investor SOA
-                    await updateInvestorSOA(allocation.investorId._id, vehicle, allocation);
+        // Update investor SOA and recent investments using a normalized "vehicle-like" object
+        const allocations = Array.isArray(lead.investorAllocations) ? lead.investorAllocations : [];
+        if (allocations.length > 0) {
+            const pseudoVehicle = {
+                _id: lead._id,
+                vehicleId: lead.leadId,
+                make: lead.vehicleInfo?.make,
+                model: lead.vehicleInfo?.model,
+                year: lead.vehicleInfo?.year,
+                investorAllocation: allocations.map((alloc) => ({
+                    investorId: alloc.investorId,
+                    amount: alloc.amount,
+                    percentage: alloc.percentage ?? alloc.ownershipPercentage
+                }))
+            };
 
-                    // Update recent investments
-                    await updateRecentInvestments(allocation.investorId._id, vehicle, allocation);
+            for (const allocation of pseudoVehicle.investorAllocation) {
+                const investorId = allocation.investorId?._id || allocation.investorId;
+                if (investorId) {
+                    await updateInvestorSOA(investorId, pseudoVehicle, allocation);
+                    await updateRecentInvestments(investorId, pseudoVehicle, allocation);
                 }
             }
         }
 
-        logger.info(`Vehicle ${vehicle.vehicleId} marked as ready for sale`);
+        logger.info(`Vehicle ${lead.leadId} marked as sale`);
 
         res.status(200).json({
             success: true,
             message: 'Vehicle marked as ready for sale',
-            data: vehicle
+            data: lead
         });
     } catch (error) {
         logger.error('Mark vehicle as ready error:', error);
@@ -978,7 +1050,7 @@ const updateInvestorSOA = async (investorId, vehicle, allocation) => {
             },
             investmentAmount: allocation.amount,
             investmentPercentage: allocation.percentage,
-            status: 'ready_for_sale',
+            status: 'sale',
             investmentDate: new Date()
         };
 
@@ -1196,11 +1268,11 @@ exports.updateChecklist = async (req, res, next) => {
 
             await vehicle.save();
 
-            // Auto-transition to ready_for_sale if all items complete
+            // Auto-transition to sale if all items complete
             if (vehicle.isOperationalChecklistComplete() && vehicle.status === 'in_inventory') {
-                vehicle.status = 'ready_for_sale';
+                vehicle.status = 'sale';
                 await vehicle.save();
-                logger.info(`Vehicle ${vehicle.vehicleId} auto-transitioned to ready_for_sale`);
+                logger.info(`Vehicle ${vehicle.vehicleId} auto-transitioned to sale`);
             }
 
             res.status(200).json({
@@ -1689,55 +1761,18 @@ exports.uploadCostInvoiceEvidence = async (req, res, next) => {
             });
         }
 
-        // Map cost type to investor assignment field in PurchaseOrder
-        const costTypeToInvestorField = {
-            'transferCost': 'transferCostInvestor',
-            'detailingInspectionCost': 'detailingInspectionCostInvestor',
-            'agentCommission': 'agentCommissionInvestor',
-            'carRecoveryCost': 'carRecoveryCostInvestor',
-            'otherCharges': 'otherChargesInvestor'
-        };
+        // Find all invoices for this purchase order (one per investor)
+        const invoices = await Invoice.find({ purchaseOrderId: poId });
 
-        const investorField = costTypeToInvestorField[costType];
-        const responsibleInvestorId = purchaseOrder[investorField];
-
-        if (!responsibleInvestorId) {
-            return res.status(400).json({
-                success: false,
-                message: `No investor assigned for ${costType}. Please assign an investor first.`
-            });
-        }
-
-        // Find the invoice for this investor and purchase order
-        const invoice = await Invoice.findOne({
-            purchaseOrderId: poId,
-            investorId: responsibleInvestorId
-        });
-
-        if (!invoice) {
+        if (!invoices || invoices.length === 0) {
             return res.status(404).json({
                 success: false,
-                message: 'Invoice not found for the assigned investor. Please ensure the invoice has been generated.'
+                message: 'No invoices found for this purchase order. Please ensure invoices have been generated.'
             });
         }
 
-        // Delete existing evidence if any
-        const existingEvidence = invoice.costInvoiceEvidence?.[costType];
-        if (existingEvidence?.publicId) {
-            try {
-                const resourceType = existingEvidence.fileType === 'application/pdf' ? 'raw' : 'image';
-                await cloudinary.uploader.destroy(existingEvidence.publicId, { resource_type: resourceType });
-            } catch (cloudError) {
-                logger.error('Error deleting existing evidence from Cloudinary:', cloudError);
-            }
-        }
-
-        // Store new evidence in the invoice
-        if (!invoice.costInvoiceEvidence) {
-            invoice.costInvoiceEvidence = {};
-        }
-
-        invoice.costInvoiceEvidence[costType] = {
+        // Prepare new evidence payload
+        const newEvidence = {
             fileName: req.file.originalname,
             fileType: req.file.mimetype,
             fileSize: req.file.size,
@@ -1748,14 +1783,32 @@ exports.uploadCostInvoiceEvidence = async (req, res, next) => {
             uploadedAt: new Date()
         };
 
-        await invoice.save();
+        // For each invoice, delete existing evidence (if any) and set the new one
+        for (const invoice of invoices) {
+            const existingEvidence = invoice.costInvoiceEvidence?.[costType];
+            if (existingEvidence?.publicId) {
+                try {
+                    const resourceType = existingEvidence.fileType === 'application/pdf' ? 'raw' : 'image';
+                    await cloudinary.uploader.destroy(existingEvidence.publicId, { resource_type: resourceType });
+                } catch (cloudError) {
+                    logger.error('Error deleting existing evidence from Cloudinary:', cloudError);
+                }
+            }
 
-        logger.info(`Invoice evidence uploaded for Invoice ${invoice.invoiceNo}, cost type: ${costType}, investor: ${responsibleInvestorId}`);
+            if (!invoice.costInvoiceEvidence) {
+                invoice.costInvoiceEvidence = {};
+            }
+
+            invoice.costInvoiceEvidence[costType] = newEvidence;
+            await invoice.save();
+
+            logger.info(`Invoice evidence uploaded for Invoice ${invoice.invoiceNo}, cost type: ${costType}`);
+        }
 
         res.status(200).json({
             success: true,
             message: 'Invoice evidence uploaded successfully',
-            data: invoice
+            data: invoices
         });
     } catch (error) {
         logger.error('Upload cost invoice evidence error:', error);
@@ -1790,71 +1843,45 @@ exports.deleteCostInvoiceEvidence = async (req, res, next) => {
             });
         }
 
-        // Map cost type to investor assignment field in PurchaseOrder
-        const costTypeToInvestorField = {
-            'transferCost': 'transferCostInvestor',
-            'detailingInspectionCost': 'detailingInspectionCostInvestor',
-            'agentCommission': 'agentCommissionInvestor',
-            'carRecoveryCost': 'carRecoveryCostInvestor',
-            'otherCharges': 'otherChargesInvestor'
-        };
+        // Find all invoices for this purchase order (one per investor)
+        const invoices = await Invoice.find({ purchaseOrderId: poId });
 
-        const investorField = costTypeToInvestorField[costType];
-        const responsibleInvestorId = purchaseOrder[investorField];
-
-        if (!responsibleInvestorId) {
-            return res.status(400).json({
-                success: false,
-                message: `No investor assigned for ${costType}.`
-            });
-        }
-
-        // Find the invoice for this investor and purchase order
-        const invoice = await Invoice.findOne({
-            purchaseOrderId: poId,
-            investorId: responsibleInvestorId
-        });
-
-        if (!invoice) {
+        if (!invoices || invoices.length === 0) {
             return res.status(404).json({
                 success: false,
-                message: 'Invoice not found for the assigned investor.'
+                message: 'No invoices found for this purchase order.'
             });
         }
 
-        const evidence = invoice.costInvoiceEvidence?.[costType];
-        if (!evidence) {
-            return res.status(404).json({
-                success: false,
-                message: 'Invoice evidence not found'
-            });
-        }
-
-        // Delete from Cloudinary
-        if (evidence.publicId) {
-            try {
-                const resourceType = evidence.fileType === 'application/pdf' ? 'raw' : 'image';
-                await cloudinary.uploader.destroy(evidence.publicId, { resource_type: resourceType });
-            } catch (cloudError) {
-                logger.error('Error deleting evidence from Cloudinary:', cloudError);
+        // For each invoice, delete evidence for this cost type (if present)
+        for (const invoice of invoices) {
+            const evidence = invoice.costInvoiceEvidence?.[costType];
+            if (!evidence) {
+                continue;
             }
+
+            // Delete from Cloudinary
+            if (evidence.publicId) {
+                try {
+                    const resourceType = evidence.fileType === 'application/pdf' ? 'raw' : 'image';
+                    await cloudinary.uploader.destroy(evidence.publicId, { resource_type: resourceType });
+                } catch (cloudError) {
+                    logger.error('Error deleting evidence from Cloudinary:', cloudError);
+                }
+            }
+
+            // Remove from database using $unset
+            await Invoice.updateOne(
+                { _id: invoice._id },
+                { $unset: { [`costInvoiceEvidence.${costType}`]: '' } }
+            );
+
+            logger.info(`Invoice evidence deleted for Invoice ${invoice.invoiceNo}, cost type: ${costType}`);
         }
-
-        // Remove from database using $unset
-        await Invoice.updateOne(
-            { _id: invoice._id },
-            { $unset: { [`costInvoiceEvidence.${costType}`]: '' } }
-        );
-
-        // Refresh the document
-        const updatedInvoice = await Invoice.findById(invoice._id);
-
-        logger.info(`Invoice evidence deleted for Invoice ${invoice.invoiceNo}, cost type: ${costType}`);
 
         res.status(200).json({
             success: true,
-            message: 'Invoice evidence deleted successfully',
-            data: updatedInvoice
+            message: 'Invoice evidence deleted successfully'
         });
     } catch (error) {
         logger.error('Delete cost invoice evidence error:', error);
@@ -2533,7 +2560,10 @@ exports.convertLeadToVehicle = async (req, res, next) => {
         }
 
         if (createdInvoices.length > 0) {
-            lead.invoice = createdInvoices[0]._id;
+            const createdInvoiceIds = createdInvoices.map((inv) => inv._id);
+            lead.invoices = Array.isArray(lead.invoices)
+                ? [...new Set([...lead.invoices.map(id => id.toString()), ...createdInvoiceIds.map(id => id.toString())])]
+                : createdInvoiceIds;
             await lead.save();
         }
 
@@ -2897,8 +2927,18 @@ exports.bulkConvertLeadsToVehicles = async (req, res, next) => {
                 }
 
                 if (createdInvoices.length > 0) {
-                    lead.invoice = createdInvoices[0].invoice._id;
-                    await lead.save();
+                    const createdInvoiceIds = createdInvoices
+                        .map((entry) => entry.invoice?._id)
+                        .filter(Boolean);
+                    if (createdInvoiceIds.length > 0) {
+                        lead.invoices = Array.isArray(lead.invoices)
+                            ? [...new Set([
+                                ...lead.invoices.map(id => id.toString()),
+                                ...createdInvoiceIds.map(id => id.toString())
+                            ])]
+                            : createdInvoiceIds;
+                        await lead.save();
+                    }
                 }
 
                 results.push({
@@ -3520,7 +3560,11 @@ exports.getSignedDocument = async (req, res, next) => {
         }
 
         // Find the specific document
-        const document = purchaseOrder.docuSignDocuments.find(doc => doc.documentId === documentId);
+        // Prefer matching by MongoDB subdocument _id (unique), then fall back to DocuSign documentId
+        let document = purchaseOrder.docuSignDocuments.id(documentId);
+        if (!document) {
+            document = purchaseOrder.docuSignDocuments.find(doc => doc.documentId === documentId);
+        }
         if (!document) {
             logger.error(`Document ${documentId} not found in purchase order ${id}. Available documents:`,
                 purchaseOrder.docuSignDocuments.map(doc => ({ documentId: doc.documentId, name: doc.name }))

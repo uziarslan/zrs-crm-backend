@@ -95,6 +95,7 @@ exports.exportInventory = async (req, res, next) => {
 
 /**
  * @desc    Export leads to Excel
+ *          Used by multiple pages (Leads, Negotiation, Inspection, Inventory)
  * @route   GET /api/v1/export/leads
  * @access  Private
  */
@@ -149,15 +150,20 @@ exports.exportLeads = async (req, res, next) => {
             { header: 'Region', key: 'region', width: 12 },
             { header: 'VIN', key: 'vin', width: 20 },
             { header: 'Asking Price', key: 'askingPrice', width: 15 },
-            { header: 'Expected Price', key: 'expectedPrice', width: 15 },
 
-            // Price Analysis
+            // Price Analysis + Job Costing
             { header: 'Min Selling Price', key: 'minSellingPrice', width: 18 },
             { header: 'Max Selling Price', key: 'maxSellingPrice', width: 18 },
-            { header: 'Purchased Final Price', key: 'purchasedFinalPrice', width: 20 },
+            { header: 'Purchase Price', key: 'purchasePrice', width: 18 },
+            { header: 'Transfer Cost', key: 'transferCost', width: 16 },
+            { header: 'Detailing / Inspection Cost', key: 'detailingInspectionCost', width: 24 },
+            { header: 'Agent Commission', key: 'agentCommission', width: 18 },
+            { header: 'Car Recovery Cost', key: 'carRecoveryCost', width: 20 },
+            { header: 'Other Charges', key: 'otherCharges', width: 16 },
+            { header: 'Total Cost', key: 'totalCost', width: 18 },
 
             // Metadata
-            { header: 'Created At', key: 'createdAt', width: 15 }
+            { header: 'Created At', key: 'createdAt', width: 18 }
         ];
 
         // Style header row
@@ -171,6 +177,15 @@ exports.exportLeads = async (req, res, next) => {
 
         // Add data
         leads.forEach(lead => {
+            const jc = lead.jobCosting || {};
+            const purchasePrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
+            const transferCost = Number(jc.transferCost || 0);
+            const detailingInspectionCost = Number(jc.detailing_inspection_cost || 0);
+            const agentCommission = Number(jc.agent_commision || 0);
+            const carRecoveryCost = Number(jc.car_recovery_cost || 0);
+            const otherCharges = Number(jc.other_charges || 0);
+            const totalCost = purchasePrice + transferCost + detailingInspectionCost + agentCommission + carRecoveryCost + otherCharges;
+
             worksheet.addRow({
                 // Lead Basic Info
                 leadId: lead.leadId || '',
@@ -196,12 +211,17 @@ exports.exportLeads = async (req, res, next) => {
                 region: lead.vehicleInfo?.region || '',
                 vin: lead.vehicleInfo?.vin || '',
                 askingPrice: lead.vehicleInfo?.askingPrice || '',
-                expectedPrice: lead.vehicleInfo?.expectedPrice || '',
 
-                // Price Analysis
+                // Price Analysis + Job Costing
                 minSellingPrice: lead.priceAnalysis?.minSellingPrice || '',
                 maxSellingPrice: lead.priceAnalysis?.maxSellingPrice || '',
-                purchasedFinalPrice: lead.priceAnalysis?.purchasedFinalPrice || '',
+                purchasePrice: purchasePrice || '',
+                transferCost: transferCost || '',
+                detailingInspectionCost: detailingInspectionCost || '',
+                agentCommission: agentCommission || '',
+                carRecoveryCost: carRecoveryCost || '',
+                otherCharges: otherCharges || '',
+                totalCost: totalCost || '',
 
                 // Metadata
                 createdAt: lead.createdAt ? new Date(lead.createdAt).toLocaleDateString() : ''

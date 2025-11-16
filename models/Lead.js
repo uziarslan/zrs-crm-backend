@@ -31,6 +31,7 @@ const leadSchema = new mongoose.Schema({
             'approved',
             'inventory',
             'consignment',
+            'sale',
             'lost',
             'cancelled'
         ],
@@ -183,12 +184,11 @@ const leadSchema = new mongoose.Schema({
         ref: 'PurchaseOrder',
         default: null
     },
-    // Reference to Invoice
-    invoice: {
+    // References to Invoices (one per investor)
+    invoices: [{
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'Invoice',
-        default: null
-    },
+        ref: 'Invoice'
+    }],
     rateAnalysis: {
         marketValue: Number,
         estimatedProfit: Number,

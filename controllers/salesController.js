@@ -51,23 +51,45 @@ exports.getSalesLeads = async (req, res, next) => {
     try {
         const { status, assignedTo, priority, search } = req.query;
 
-        const query = { type: 'sales' };
+        // Show:
+        // - Dedicated sales leads (type: 'sales')
+        // - Purchase leads that have been moved to Sales (type: 'purchase', status: 'sale')
+        const baseOrConditions = [
+            { type: 'sales' },
+            { type: 'purchase', status: 'sale' }
+        ];
 
-        if (status) query.status = status;
-        if (priority) query.priority = priority;
+        const query = { $or: baseOrConditions };
+
+        // Optional filters
+        const andConditions = [];
+
+        if (status) {
+            andConditions.push({ status });
+        }
+
+        if (priority) {
+            andConditions.push({ priority });
+        }
 
         // Managers can only see their assigned leads
         if (req.userRole === 'manager') {
-            query.assignedTo = req.userId;
+            andConditions.push({ assignedTo: req.userId });
         } else if (assignedTo) {
-            query.assignedTo = assignedTo;
+            andConditions.push({ assignedTo });
         }
 
         if (search) {
-            query.$or = [
-                { 'contactInfo.name': { $regex: search, $options: 'i' } },
-                { leadId: { $regex: search, $options: 'i' } }
-            ];
+            andConditions.push({
+                $or: [
+                    { 'contactInfo.name': { $regex: search, $options: 'i' } },
+                    { leadId: { $regex: search, $options: 'i' } }
+                ]
+            });
+        }
+
+        if (andConditions.length > 0) {
+            query.$and = andConditions;
         }
 
         const leads = await Lead.find(query)
