@@ -27,9 +27,16 @@ const purchaseOrderSchema = new mongoose.Schema({
             type: Number,
             required: true
         },
-        percentage: {
+        ownershipPercentage: {
             type: Number,
-            required: true
+            required: true,
+            min: 0,
+            max: 100
+        },
+        profitPercentage: {
+            type: Number,
+            min: 0,
+            max: 100
         },
         docuSignEnvelopeId: String,
         docuSignStatus: {
@@ -81,32 +88,6 @@ const purchaseOrderSchema = new mongoose.Schema({
             ref: 'Investor'
         }
     }],
-    // Cost fields to be captured before dual approval
-    transferCost: { type: Number }, // transfer_cost_rta
-    detailing_inspection_cost: { type: Number },
-    agent_commision: { type: Number, default: 0 },
-    car_recovery_cost: { type: Number, default: 0 },
-    other_charges: { type: Number, default: 0 },
-    transferCostInvestor: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'Investor'
-    },
-    detailingInspectionCostInvestor: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'Investor'
-    },
-    agentCommissionInvestor: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'Investor'
-    },
-    carRecoveryCostInvestor: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'Investor'
-    },
-    otherChargesInvestor: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'Investor'
-    },
     total_investment: { type: Number },
     prepared_by: { type: String },
     status: {

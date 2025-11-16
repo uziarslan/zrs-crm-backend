@@ -16,7 +16,8 @@ async function renderInvoiceHtml(invoiceData) {
         'agent_commission',
         'car_recovery_cost',
         'other_charges',
-        'total_amount_payable'
+        'total_amount_payable',
+        'invested_amount'
     ];
     for (const key of numFields) {
         if (formatted[key] != null && formatted[key] !== '') {
@@ -61,9 +62,15 @@ function drawTable(doc, startX, startY, columnWidths, rows, opts = {}) {
     }
 
     // Draw rows (auto-page-break)
-    rows.forEach((row) => {
+    rows.forEach((row, rowIndex) => {
         ensureSpace();
         x = startX;
+        const isBoldRow = opts.boldRows && opts.boldRows.includes(rowIndex);
+        if (isBoldRow) {
+            doc.font('Helvetica-Bold');
+        } else {
+            doc.font('Helvetica');
+        }
         row.forEach((cell, i) => {
             const w = columnWidths[i] || 60;
             doc.rect(x, y, w, rowHeight).strokeColor(lineColor).stroke();
@@ -154,7 +161,12 @@ exports.generateInvoicePdfBuffer = async (invoiceData) => {
             ['Chassis No.', invoiceData.chassis_no || '']
         ]);
 
-        const money = (n) => (n == null || n === '') ? '0' : String(n);
+        const money = (n) => {
+            if (n == null || n === '') return '0';
+            const num = Number(n);
+            if (Number.isNaN(num)) return String(n);
+            return num.toLocaleString();
+        };
         doc.moveDown(0.8);
         heading('Invoice Summary');
         doc.font('Helvetica');
@@ -162,13 +174,14 @@ exports.generateInvoicePdfBuffer = async (invoiceData) => {
             ['Buying Price', `AED ${money(invoiceData.buying_price)}`],
             ['Transfer Cost (RTA)', `AED ${money(invoiceData.transfer_cost)}`],
             ['Detailing / Inspection Cost', `AED ${money(invoiceData.detailing_inspection_cost)}`],
-            ['Agent Commission (Optional)', `AED ${money(invoiceData.agent_commission)}`],
-            ['Car Recovery Cost (Optional)', `AED ${money(invoiceData.car_recovery_cost)}`],
-            ['Other Charges (if any)', `AED ${money(invoiceData.other_charges)}`],
-            ['Total Amount Payable', `AED ${money(invoiceData.total_amount_payable)}`]
-        ], { alignRightCols: [1] });
+            ['Agent Commission', `AED ${money(invoiceData.agent_commission)}`],
+            ['Car Recovery Cost', `AED ${money(invoiceData.car_recovery_cost)}`],
+            ['Other Charges', `AED ${money(invoiceData.other_charges)}`],
+            ['Total Amount Payable', `AED ${money(invoiceData.total_amount_payable)}`],
+            ['Invested Amount', `AED ${money(invoiceData.invested_amount || invoiceData.total_amount_payable)}`]
+        ], { alignRightCols: [1], boldRows: [7] });
 
-        doc.moveDown(0.8);
+        doc.moveDown(5);
         heading('Payment Details');
         doc.font('Helvetica');
         y = drawTable(doc, doc.page.margins.left, doc.y, [200, 290], [

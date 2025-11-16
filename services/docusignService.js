@@ -216,7 +216,7 @@ class DocuSignService {
      */
     async createLeadPurchaseAgreement(leadData) {
         try {
-            const { leadId, investor, priceAnalysis, vehicleInfo, contactInfo, purchaseOrder, allocation } = leadData;
+            const { leadId, investor, priceAnalysis, vehicleInfo, contactInfo, jobCosting, purchaseOrder, allocation } = leadData;
 
             if (!investor || !investor.email) {
                 throw new Error('Investor email is required to send DocuSign purchase agreement');
@@ -225,14 +225,18 @@ class DocuSignService {
             // Debug logging
             logger.info('DocuSign createLeadPurchaseAgreement called with:', {
                 leadId,
-                investor: investor ? { name: investor.name, email: investor.email, _id: investor._id } : null,
+                investor: investor ? { name: investor.name, email: investor.email, investorEid: investor.investorEid, _id: investor._id } : null,
                 hasPriceAnalysis: !!priceAnalysis,
                 hasVehicleInfo: !!vehicleInfo,
                 hasContactInfo: !!contactInfo,
+                hasJobCosting: !!jobCosting,
+                hasPurchaseOrder: !!purchaseOrder,
                 allocation: allocation ? {
                     investorId: allocation.investorId,
+                    ownershipPercentage: allocation.ownershipPercentage,
                     percentage: allocation.percentage,
-                    amount: allocation.amount
+                    amount: allocation.amount,
+                    profitPercentage: allocation.profitPercentage
                 } : null
             });
 
@@ -284,37 +288,87 @@ class DocuSignService {
             // Add template variables (custom fields in your DocuSign template)
             // Map provided PO fields to template tabs exactly as requested
             const fmt = (v) => (v == null || v === '') ? 'N/A' : String(v);
+            
+            // Helper function to format numbers with commas
+            const fmtNumber = (v) => {
+                if (v == null || v === '') return 'N/A';
+                const num = Number(v);
+                if (isNaN(num)) return String(v);
+                return num.toLocaleString('en-US');
+            };
+            
+            // Helper function to format percentage with % sign
+            const fmtPercentage = (v) => {
+                if (v == null || v === '') return 'N/A';
+                const num = Number(v);
+                if (isNaN(num)) return String(v);
+                return `${num.toLocaleString('en-US')}%`;
+            };
+            
+            // Helper function to format mileage with Km suffix
+            const fmtMileage = (v) => {
+                if (v == null || v === '') return 'N/A';
+                const num = Number(v);
+                if (isNaN(num)) return String(v);
+                return `${num.toLocaleString('en-US')} Km`;
+            };
+            
+            // Calculate total car price (buying price + all job costs)
+            const buyingPrice = Number(priceAnalysis?.purchasedFinalPrice || 0);
+            const transferCost = Number(jobCosting?.transferCost || 0);
+            const detailingCost = Number(jobCosting?.detailing_inspection_cost || 0);
+            const agentCommission = Number(jobCosting?.agent_commision || 0);
+            const carRecoveryCost = Number(jobCosting?.car_recovery_cost || 0);
+            const otherCharges = Number(jobCosting?.other_charges || 0);
+            const totalCarPrice = buyingPrice + transferCost + detailingCost + agentCommission + carRecoveryCost + otherCharges;
+            
+            // Get investment amount and percentage from allocation
+            const investmentAmount = allocation?.amount || 0;
+            const investmentPercentage = allocation?.ownershipPercentage || allocation?.percentage || 0;
+            
             templateRole.tabs = {
                 textTabs: [
-                    // From Lead
-                    { tabLabel: 'buying_price', value: fmt(priceAnalysis?.purchasedFinalPrice) },
-                    { tabLabel: 'car_chassis', value: fmt(vehicleInfo?.vin) },
-                    { tabLabel: 'car_color', value: fmt(vehicleInfo?.color) },
-                    { tabLabel: 'car_make', value: fmt(vehicleInfo?.make) },
-                    { tabLabel: 'car_mileage', value: fmt(vehicleInfo?.mileage) },
-                    { tabLabel: 'car_model', value: fmt(vehicleInfo?.model) },
-                    { tabLabel: 'car_region', value: fmt(vehicleInfo?.region) },
-                    { tabLabel: 'car_trim', value: fmt(vehicleInfo?.trim) },
-                    { tabLabel: 'car_year', value: fmt(vehicleInfo?.year) },
-                    { tabLabel: 'eid_passport', value: fmt(contactInfo?.passportOrEmiratesId) },
-                    { tabLabel: 'investor_name', value: fmt(investor?.name) },
-
-                    // From PurchaseOrder
-                    { tabLabel: 'agent_commision', value: fmt(purchaseOrder?.agent_commision) },
-                    { tabLabel: 'car_recovery_cost', value: fmt(purchaseOrder?.car_recovery_cost) },
-                    { tabLabel: 'detailing_inspection_cost', value: fmt(purchaseOrder?.detailing_inspection_cost) },
-                    { tabLabel: 'other_charges', value: fmt(purchaseOrder?.other_charges) },
-                    { tabLabel: 'prepared_by', value: fmt(purchaseOrder?.prepared_by) },
+                    // 1. purchase_order_no
                     { tabLabel: 'purchase_order_no', value: fmt(purchaseOrder?.poId) },
-                    { tabLabel: 'total_investment_amount', value: fmt(purchaseOrder?.total_investment) },
-                    { tabLabel: 'transfer_cost_rta', value: fmt(purchaseOrder?.transferCost) },
-
-                    // Date
+                    
+                    // 2. date
                     { tabLabel: 'date', value: fmt(new Date().toLocaleDateString()) },
-
-                    // Allocation Specific (optional tabs in template)
-                    { tabLabel: 'investor_allocation_percentage', value: fmt(allocation?.percentage) },
-                    { tabLabel: 'investor_allocation_amount', value: fmt(allocation?.amount) }
+                    
+                    // 3. investor_name
+                    { tabLabel: 'investor_name', value: fmt(investor?.name) },
+                    
+                    // 4. investor_eid
+                    { tabLabel: 'investor_eid', value: fmt(investor?.investorEid) },
+                    
+                    // 5. prepared_by
+                    { tabLabel: 'prepared_by', value: fmt(purchaseOrder?.prepared_by) },
+                    
+                    // 6-13. Car details
+                    { tabLabel: 'car_make', value: fmt(vehicleInfo?.make) },
+                    { tabLabel: 'car_model', value: fmt(vehicleInfo?.model) },
+                    { tabLabel: 'car_trim', value: fmt(vehicleInfo?.trim) },
+                    { tabLabel: 'car_color', value: fmt(vehicleInfo?.color) },
+                    { tabLabel: 'car_mileage', value: fmtMileage(vehicleInfo?.mileage) },
+                    { tabLabel: 'car_year', value: fmt(vehicleInfo?.year) },
+                    { tabLabel: 'car_region', value: fmt(vehicleInfo?.region) },
+                    { tabLabel: 'car_chassis', value: fmt(vehicleInfo?.vin) },
+                    
+                    // 13. buying_price
+                    { tabLabel: 'buying_price', value: fmtNumber(buyingPrice) },
+                    
+                    // 14-18. Job costing (from lead.jobCosting)
+                    { tabLabel: 'transfer_cost_rta', value: fmtNumber(transferCost) },
+                    { tabLabel: 'detailing_inspection_cost', value: fmtNumber(detailingCost) },
+                    { tabLabel: 'agent_commision', value: fmtNumber(agentCommission) },
+                    { tabLabel: 'car_recovery_cost', value: fmtNumber(carRecoveryCost) },
+                    { tabLabel: 'other_charges', value: fmtNumber(otherCharges) },
+                    
+                    // 19. total_car_price (buying_price + all job costs)
+                    { tabLabel: 'total_car_price', value: fmtNumber(totalCarPrice) },
+                    
+                    // 20-21. Investment details (from allocation)
+                    { tabLabel: 'investment_amount', value: fmtNumber(investmentAmount) },
+                    { tabLabel: 'investment_percentage', value: fmtPercentage(investmentPercentage) }
                 ]
             };
 

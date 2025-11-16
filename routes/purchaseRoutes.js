@@ -136,8 +136,16 @@ router.put(
     body('investorAllocations')
         .isArray()
         .withMessage('Investor allocations must be an array')
-        .custom((value) => Array.isArray(value) && (value.length === 0 || value.every((item) => item && item.investorId && item.percentage !== undefined)))
-        .withMessage('Each investor allocation must include investorId and percentage'),
+        .custom((value) => {
+            if (!Array.isArray(value)) return false;
+            if (value.length === 0) return true;
+            return value.every((item) => {
+                return item && 
+                       item.investorId && 
+                       (item.percentage !== undefined || item.ownershipPercentage !== undefined);
+            });
+        })
+        .withMessage('Each investor allocation must include investorId and percentage (or ownershipPercentage)'),
     validate,
     purchaseController.assignInvestorToLead
 );

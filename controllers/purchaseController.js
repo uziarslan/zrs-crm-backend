@@ -52,73 +52,19 @@ exports.upsertLeadPurchaseOrder = async (req, res, next) => {
             });
         }
 
-        // Update cost fields
-        const {
-            transferCost,
-            detailing_inspection_cost,
-            agent_commision,
-            car_recovery_cost,
-            other_charges,
-            transferCostInvestor,
-            detailingInspectionCostInvestor,
-            agentCommissionInvestor,
-            carRecoveryCostInvestor,
-            otherChargesInvestor
-        } = req.body;
+        // Job costing is now stored in Lead schema, not PurchaseOrder
+        // Calculate final price and update PO amount
+        const purchasedFinalPrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
+        const jobCosting = lead.jobCosting || {};
+        const finalPrice = purchasedFinalPrice +
+            Number(jobCosting.transferCost || 0) +
+            Number(jobCosting.detailing_inspection_cost || 0) +
+            Number(jobCosting.agent_commision || 0) +
+            Number(jobCosting.car_recovery_cost || 0) +
+            Number(jobCosting.other_charges || 0);
 
-        const allowedInvestorIds = new Set(
-            (lead.investorAllocations || [])
-                .map((allocation) => {
-                    const id = allocation?.investorId?._id || allocation?.investorId;
-                    return id ? id.toString() : null;
-                })
-                .filter(Boolean)
-        );
-
-        const makeValidationError = (message) => {
-            const error = new Error(message);
-            error.statusCode = 400;
-            return error;
-        };
-
-        const normalizeAssignment = (value, label) => {
-            if (value == null || value === '') {
-                return null;
-            }
-
-            const stringValue = value.toString();
-            if (!mongoose.Types.ObjectId.isValid(stringValue)) {
-                throw makeValidationError(`${label} must be a valid investor ID.`);
-            }
-
-            if (!allowedInvestorIds.has(stringValue)) {
-                throw makeValidationError(`${label} must reference an investor assigned to this lead.`);
-            }
-
-            return stringValue;
-        };
-
-        purchaseOrder.transferCost = Number(transferCost);
-        purchaseOrder.detailing_inspection_cost = Number(detailing_inspection_cost);
-        if (agent_commision != null && agent_commision !== '') purchaseOrder.agent_commision = Number(agent_commision);
-        if (car_recovery_cost != null && car_recovery_cost !== '') purchaseOrder.car_recovery_cost = Number(car_recovery_cost);
-        if (other_charges != null && other_charges !== '') purchaseOrder.other_charges = Number(other_charges);
-
-        purchaseOrder.transferCostInvestor = normalizeAssignment(transferCostInvestor, 'Transfer cost investor');
-        purchaseOrder.detailingInspectionCostInvestor = normalizeAssignment(detailingInspectionCostInvestor, 'Detailing / inspection cost investor');
-        purchaseOrder.agentCommissionInvestor = normalizeAssignment(agentCommissionInvestor, 'Agent commission investor');
-        purchaseOrder.carRecoveryCostInvestor = normalizeAssignment(carRecoveryCostInvestor, 'Car recovery cost investor');
-        purchaseOrder.otherChargesInvestor = normalizeAssignment(otherChargesInvestor, 'Other charges investor');
-
-        // Auto-calculate total investment: buying price + all costs
-        const buyingPrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
-        const totalInvestment = buyingPrice
-            + (purchaseOrder.transferCost || 0)
-            + (purchaseOrder.detailing_inspection_cost || 0)
-            + (purchaseOrder.agent_commision || 0)
-            + (purchaseOrder.car_recovery_cost || 0)
-            + (purchaseOrder.other_charges || 0);
-        purchaseOrder.total_investment = totalInvestment;
+        purchaseOrder.amount = finalPrice;
+        purchaseOrder.total_investment = finalPrice;
 
         // Auto-set prepared_by from current admin
         if (req.userRole === 'admin') {
@@ -248,7 +194,7 @@ exports.bulkCreateLeads = async (req, res, next) => {
         for (let i = 0; i < leads.length; i++) {
             try {
                 const leadData = leads[i];
-                
+
                 // Validate required fields
                 if (!leadData.contactInfo?.name || !leadData.vehicleInfo?.make || !leadData.vehicleInfo?.model) {
                     errors.push({
@@ -1060,9 +1006,17 @@ const updateInvestorSOA = async (investorId, vehicle, allocation) => {
 };
 
 function normalizeLeadAllocations(lead, options = {}) {
-    const purchasePrice = options.purchasePrice != null
+    // Calculate final price: purchasedFinalPrice + all job costs
+    const purchasedFinalPrice = Number(lead?.priceAnalysis?.purchasedFinalPrice || 0);
+    const jobCosting = lead?.jobCosting || {};
+    const finalPrice = options.purchasePrice != null
         ? Number(options.purchasePrice)
-        : Number(lead?.priceAnalysis?.purchasedFinalPrice || 0);
+        : (purchasedFinalPrice +
+            Number(jobCosting.transferCost || 0) +
+            Number(jobCosting.detailing_inspection_cost || 0) +
+            Number(jobCosting.agent_commision || 0) +
+            Number(jobCosting.car_recovery_cost || 0) +
+            Number(jobCosting.other_charges || 0));
 
     const allocations = Array.isArray(lead?.investorAllocations)
         ? lead.investorAllocations
@@ -1081,22 +1035,23 @@ function normalizeLeadAllocations(lead, options = {}) {
             ? (typeof investorDoc.toObject === 'function' ? investorDoc.toObject() : { ...investorDoc })
             : null;
 
-        let percentage = Number(allocation?.percentage);
-        const hasValidPercentage = !Number.isNaN(percentage) && percentage > 0;
+        // Use ownershipPercentage if available, fallback to percentage for backward compatibility
+        let ownershipPercentage = Number(allocation?.ownershipPercentage || allocation?.percentage);
+        const hasValidOwnershipPercentage = !Number.isNaN(ownershipPercentage) && ownershipPercentage > 0;
 
-        if (!hasValidPercentage && allocation?.amount != null && allocation.amount !== '' && purchasePrice > 0) {
-            percentage = Number(((Number(allocation.amount) / purchasePrice) * 100).toFixed(2));
+        if (!hasValidOwnershipPercentage && allocation?.amount != null && allocation.amount !== '' && finalPrice > 0) {
+            ownershipPercentage = Number(((Number(allocation.amount) / finalPrice) * 100).toFixed(2));
         }
 
-        if (Number.isNaN(percentage)) {
-            percentage = 0;
+        if (Number.isNaN(ownershipPercentage)) {
+            ownershipPercentage = 0;
         }
 
         let amount = 0;
         if (allocation?.amount != null && allocation.amount !== '') {
             amount = Number(allocation.amount);
-        } else if (purchasePrice > 0 && percentage > 0) {
-            amount = Number(((percentage / 100) * purchasePrice).toFixed(2));
+        } else if (finalPrice > 0 && ownershipPercentage > 0) {
+            amount = Number(((ownershipPercentage / 100) * finalPrice).toFixed(2));
         }
 
         return {
@@ -1104,8 +1059,10 @@ function normalizeLeadAllocations(lead, options = {}) {
             investor: investorPlain || undefined,
             name: investorPlain?.name,
             email: investorPlain?.email,
-            percentage,
-            amount
+            percentage: ownershipPercentage, // Keep for backward compatibility
+            ownershipPercentage,
+            amount,
+            profitPercentage: allocation?.profitPercentage || undefined
         };
     }).filter(Boolean);
 }
@@ -1888,7 +1845,7 @@ exports.deleteCostInvoiceEvidence = async (req, res, next) => {
             { _id: invoice._id },
             { $unset: { [`costInvoiceEvidence.${costType}`]: '' } }
         );
-        
+
         // Refresh the document
         const updatedInvoice = await Invoice.findById(invoice._id);
 
@@ -1913,7 +1870,7 @@ exports.deleteCostInvoiceEvidence = async (req, res, next) => {
 exports.updatePriceAnalysis = async (req, res, next) => {
     try {
         // Normalize empty strings to null
-        let { minSellingPrice, maxSellingPrice, purchasedFinalPrice, vin } = req.body;
+        let { minSellingPrice, maxSellingPrice, purchasedFinalPrice, vin, jobCosting } = req.body;
 
         minSellingPrice = minSellingPrice || null;
         maxSellingPrice = maxSellingPrice || null;
@@ -1967,6 +1924,17 @@ exports.updatePriceAnalysis = async (req, res, next) => {
             updatedBy: req.userId,
             updatedByModel: req.userRole === 'admin' ? 'Admin' : 'Manager'
         };
+
+        // Update job costing if provided
+        if (jobCosting && typeof jobCosting === 'object') {
+            lead.jobCosting = {
+                transferCost: jobCosting.transferCost != null ? Number(jobCosting.transferCost) : (lead.jobCosting?.transferCost || 0),
+                detailing_inspection_cost: jobCosting.detailing_inspection_cost != null ? Number(jobCosting.detailing_inspection_cost) : (lead.jobCosting?.detailing_inspection_cost || 0),
+                agent_commision: jobCosting.agent_commision != null ? Number(jobCosting.agent_commision) : (lead.jobCosting?.agent_commision || 0),
+                car_recovery_cost: jobCosting.car_recovery_cost != null ? Number(jobCosting.car_recovery_cost) : (lead.jobCosting?.car_recovery_cost || 0),
+                other_charges: jobCosting.other_charges != null ? Number(jobCosting.other_charges) : (lead.jobCosting?.other_charges || 0)
+            };
+        }
 
         // Optionally update VIN (chassis number) when provided in the same request
         if (typeof vin === 'string') {
@@ -2348,11 +2316,12 @@ exports.convertLeadToVehicle = async (req, res, next) => {
 
         const invoiceDate = new Date();
         const buyingPrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
-        const transferCost = Number(purchaseOrder.transferCost || 0);
-        const detailingInspectionCost = Number(purchaseOrder.detailing_inspection_cost || 0);
-        const agentCommission = Number(purchaseOrder.agent_commision || 0);
-        const carRecoveryCost = Number(purchaseOrder.car_recovery_cost || 0);
-        const otherCharges = Number(purchaseOrder.other_charges || 0);
+        const jobCosting = lead.jobCosting || {};
+        const transferCost = Number(jobCosting.transferCost || 0);
+        const detailingInspectionCost = Number(jobCosting.detailing_inspection_cost || 0);
+        const agentCommission = Number(jobCosting.agent_commision || 0);
+        const carRecoveryCost = Number(jobCosting.car_recovery_cost || 0);
+        const otherCharges = Number(jobCosting.other_charges || 0);
         const totalPayable = buyingPrice + transferCost + detailingInspectionCost + agentCommission + carRecoveryCost + otherCharges;
         const allocationSharesByInvestor = new Map();
         const baseAmountTotal = normalizedAllocations.reduce((sum, allocation) => {
@@ -2485,13 +2454,13 @@ exports.convertLeadToVehicle = async (req, res, next) => {
                 yearModel: lead.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
                 chassisNo: lead.vehicleInfo?.vin || '',
                 region: lead.vehicleInfo?.region || '',
-                buyingPrice: breakdown.buyingPrice,
-                transferCost: breakdown.transferCost,
-                detailingInspectionCost: breakdown.detailingInspectionCost,
-                agentCommission: breakdown.agentCommission,
-                carRecoveryCost: breakdown.carRecoveryCost,
-                otherCharges: breakdown.otherCharges,
-                totalAmountPayable: shareInfo.amount,
+                buyingPrice,
+                transferCost,
+                detailingInspectionCost,
+                agentCommission,
+                carRecoveryCost,
+                otherCharges,
+                totalAmountPayable: totalPayable,
                 investmentPercentage: shareInfo.percentage,
                 modeOfPayment: modeOfPaymentValue,
                 paymentReceivedBy: paymentReceivedByValue,
@@ -2512,13 +2481,14 @@ exports.convertLeadToVehicle = async (req, res, next) => {
                         trim: invoiceData.trim,
                         year_model: invoiceData.yearModel,
                         chassis_no: invoiceData.chassisNo,
-                        buying_price: breakdown.buyingPrice,
-                        transfer_cost: breakdown.transferCost,
-                        detailing_inspection_cost: breakdown.detailingInspectionCost,
-                        agent_commission: breakdown.agentCommission,
-                        car_recovery_cost: breakdown.carRecoveryCost,
-                        other_charges: breakdown.otherCharges,
-                        total_amount_payable: shareInfo.amount,
+                        buying_price: buyingPrice,
+                        transfer_cost: transferCost,
+                        detailing_inspection_cost: detailingInspectionCost,
+                        agent_commission: agentCommission,
+                        car_recovery_cost: carRecoveryCost,
+                        other_charges: otherCharges,
+                        total_amount_payable: totalPayable,
+                        invested_amount: shareInfo.amount,
                         investment_percentage: invoiceData.investmentPercentage != null
                             ? Number(invoiceData.investmentPercentage).toFixed(2)
                             : '',
@@ -2712,11 +2682,12 @@ exports.bulkConvertLeadsToVehicles = async (req, res, next) => {
 
                 const invoiceDate = new Date();
                 const buyingPrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
-                const transferCost = Number(purchaseOrder.transferCost || 0);
-                const detailingInspectionCost = Number(purchaseOrder.detailing_inspection_cost || 0);
-                const agentCommission = Number(purchaseOrder.agent_commision || 0);
-                const carRecoveryCost = Number(purchaseOrder.car_recovery_cost || 0);
-                const otherCharges = Number(purchaseOrder.other_charges || 0);
+                const jobCosting = lead.jobCosting || {};
+                const transferCost = Number(jobCosting.transferCost || 0);
+                const detailingInspectionCost = Number(jobCosting.detailing_inspection_cost || 0);
+                const agentCommission = Number(jobCosting.agent_commision || 0);
+                const carRecoveryCost = Number(jobCosting.car_recovery_cost || 0);
+                const otherCharges = Number(jobCosting.other_charges || 0);
                 const totalPayable = buyingPrice + transferCost + detailingInspectionCost + agentCommission + carRecoveryCost + otherCharges;
                 const allocationSharesByInvestor = new Map();
                 const baseAmountTotal = normalizedAllocations.reduce((sum, allocation) => {
@@ -2846,16 +2817,16 @@ exports.bulkConvertLeadsToVehicles = async (req, res, next) => {
                         yearModel: lead.vehicleInfo?.year ? String(lead.vehicleInfo.year) : '',
                         chassisNo: lead.vehicleInfo?.vin || '',
                         region: lead.vehicleInfo?.region || '',
-                        buyingPrice: breakdown.buyingPrice,
-                        transferCost: breakdown.transferCost,
-                        detailingInspectionCost: breakdown.detailingInspectionCost,
-                        agentCommission: breakdown.agentCommission,
-                        carRecoveryCost: breakdown.carRecoveryCost,
-                        otherCharges: breakdown.otherCharges,
-                        totalAmountPayable: shareInfo.amount,
+                        buyingPrice,
+                        transferCost,
+                        detailingInspectionCost,
+                        agentCommission,
+                        carRecoveryCost,
+                        otherCharges,
+                        totalAmountPayable: totalPayable,
                         investmentPercentage: shareInfo.percentage,
-                            modeOfPayment: modeOfPaymentValue,
-                            paymentReceivedBy: paymentReceivedByValue,
+                        modeOfPayment: modeOfPaymentValue,
+                        paymentReceivedBy: paymentReceivedByValue,
                         dateOfPayment: invoiceDate.toLocaleDateString('en-GB')
                     };
 
@@ -2873,15 +2844,16 @@ exports.bulkConvertLeadsToVehicles = async (req, res, next) => {
                                 trim: invoiceData.trim,
                                 year_model: invoiceData.yearModel,
                                 chassis_no: invoiceData.chassisNo,
-                            buying_price: breakdown.buyingPrice,
-                            transfer_cost: breakdown.transferCost,
-                            detailing_inspection_cost: breakdown.detailingInspectionCost,
-                            agent_commission: breakdown.agentCommission,
-                            car_recovery_cost: breakdown.carRecoveryCost,
-                            other_charges: breakdown.otherCharges,
-                            total_amount_payable: shareInfo.amount,
-                            investment_percentage: invoiceData.investmentPercentage != null
-                                ? Number(invoiceData.investmentPercentage).toFixed(2)
+                                buying_price: buyingPrice,
+                                transfer_cost: transferCost,
+                                detailing_inspection_cost: detailingInspectionCost,
+                                agent_commission: agentCommission,
+                                car_recovery_cost: carRecoveryCost,
+                                other_charges: otherCharges,
+                                total_amount_payable: totalPayable,
+                                invested_amount: shareInfo.amount,
+                                investment_percentage: invoiceData.investmentPercentage != null
+                                    ? Number(invoiceData.investmentPercentage).toFixed(2)
                                     : '',
                                 mode_of_payment: modeOfPaymentValue,
                                 payment_received_by: paymentReceivedByValue,
@@ -3056,8 +3028,18 @@ exports.assignInvestorToLead = async (req, res, next) => {
         }
 
         const investorsById = new Map(investors.map(inv => [inv._id.toString(), inv]));
-        const purchasePrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
-        let totalPercentage = 0;
+
+        // Calculate final price: purchasedFinalPrice + all job costs
+        const purchasedFinalPrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
+        const jobCosting = lead.jobCosting || {};
+        const finalPrice = purchasedFinalPrice +
+            Number(jobCosting.transferCost || 0) +
+            Number(jobCosting.detailing_inspection_cost || 0) +
+            Number(jobCosting.agent_commision || 0) +
+            Number(jobCosting.car_recovery_cost || 0) +
+            Number(jobCosting.other_charges || 0);
+
+        let totalOwnershipPercentage = 0;
 
         const normalizedAllocations = investorAllocations.map((allocation) => {
             const investorId = allocation.investorId?.toString();
@@ -3070,52 +3052,70 @@ exports.assignInvestorToLead = async (req, res, next) => {
                 throw new Error(`Investor ${investor.name} is not active`);
             }
 
-            const percentage = Number(allocation.percentage);
-            if (Number.isNaN(percentage) || percentage <= 0) {
-                throw new Error(`Allocation percentage must be greater than 0 for investor ${investor.name}`);
+            // Ownership percentage (for calculating amount)
+            const ownershipPercentage = Number(allocation.ownershipPercentage || allocation.percentage || 0);
+            if (Number.isNaN(ownershipPercentage) || ownershipPercentage <= 0) {
+                throw new Error(`Ownership percentage must be greater than 0 for investor ${investor.name}`);
             }
 
-            const minAllowed = investor.decidedPercentageMin ?? 0;
-            const maxAllowed = investor.decidedPercentageMax ?? 100;
-
-            if (percentage < minAllowed || percentage > maxAllowed) {
-                throw new Error(
-                    `Allocation percentage for ${investor.name} must be between ${minAllowed}% and ${maxAllowed}%`
-                );
+            if (ownershipPercentage > 100) {
+                throw new Error(`Ownership percentage cannot exceed 100% for investor ${investor.name}`);
             }
 
-            totalPercentage += percentage;
+            totalOwnershipPercentage += ownershipPercentage;
 
+            // Calculate amount based on ownership percentage and final price
             let amount = 0;
             if (allocation.amount != null && allocation.amount !== '') {
                 amount = Number(allocation.amount);
                 if (Number.isNaN(amount) || amount < 0) {
                     throw new Error(`Allocation amount must be a non-negative number for investor ${investor.name}`);
                 }
-            } else if (purchasePrice > 0) {
-                amount = Number(((percentage / 100) * purchasePrice).toFixed(2));
+            } else if (finalPrice > 0) {
+                amount = Number(((ownershipPercentage / 100) * finalPrice).toFixed(2));
+            }
+
+            // Profit percentage (optional, validated against investor's decidedPercentageMin/Max)
+            let profitPercentage = null;
+            if (allocation.profitPercentage != null && allocation.profitPercentage !== '') {
+                profitPercentage = Number(allocation.profitPercentage);
+                if (Number.isNaN(profitPercentage) || profitPercentage < 0) {
+                    throw new Error(`Profit percentage must be a non-negative number for investor ${investor.name}`);
+                }
+
+                const minProfitAllowed = investor.decidedPercentageMin ?? 0;
+                const maxProfitAllowed = investor.decidedPercentageMax ?? 100;
+
+                if (profitPercentage < minProfitAllowed || profitPercentage > maxProfitAllowed) {
+                    throw new Error(
+                        `Profit percentage for ${investor.name} must be between ${minProfitAllowed}% and ${maxProfitAllowed}%`
+                    );
+                }
             }
 
             return {
                 investorId: investor._id,
-                percentage,
+                ownershipPercentage,
                 amount,
+                profitPercentage,
                 name: investor.name,
                 email: investor.email
             };
         });
 
-        if (totalPercentage > 100.0001) {
+        if (totalOwnershipPercentage > 100.0001) {
             return res.status(400).json({
                 success: false,
-                message: 'Total allocation percentage cannot exceed 100%'
+                message: 'Total ownership percentage cannot exceed 100%'
             });
         }
 
-        lead.investorAllocations = normalizedAllocations.map(({ investorId, percentage, amount }) => ({
+        lead.investorAllocations = normalizedAllocations.map(({ investorId, ownershipPercentage, amount, profitPercentage }) => ({
             investorId,
-            percentage,
-            amount
+            percentage: ownershipPercentage, // Keep for backward compatibility
+            ownershipPercentage,
+            amount,
+            profitPercentage
         }));
         await lead.save();
 
@@ -3124,11 +3124,13 @@ exports.assignInvestorToLead = async (req, res, next) => {
             const purchaseOrder = await PurchaseOrder.findById(lead.purchaseOrder);
             if (purchaseOrder) {
                 purchaseOrder.investorId = normalizedAllocations[0]?.investorId || null;
-                purchaseOrder.investorAllocations = normalizedAllocations.map(({ investorId, percentage, amount }) => ({
+                purchaseOrder.investorAllocations = normalizedAllocations.map(({ investorId, ownershipPercentage, amount, profitPercentage }) => ({
                     investorId,
-                    percentage,
-                    amount: amount || Number(((percentage / 100) * (purchaseOrder.amount || purchasePrice || 0)).toFixed(2))
+                    ownershipPercentage,
+                    amount,
+                    profitPercentage: profitPercentage || undefined
                 }));
+                purchaseOrder.amount = finalPrice; // Update PO amount to final price
                 await purchaseOrder.save();
             }
         }
@@ -3181,6 +3183,12 @@ exports.submitLeadForApproval = async (req, res, next) => {
         const pa = lead.priceAnalysis || {};
         if (!(pa.minSellingPrice && pa.maxSellingPrice && pa.purchasedFinalPrice)) {
             return res.status(400).json({ success: false, message: 'Price analysis incomplete' });
+        }
+
+        // Validate job costing complete
+        const jc = lead.jobCosting || {};
+        if (!jc.transferCost || !jc.detailing_inspection_cost) {
+            return res.status(400).json({ success: false, message: 'Job costing incomplete. Transfer Cost and Detailing/Inspection Cost are required.' });
         }
 
         // Validate investor assigned
@@ -3280,7 +3288,7 @@ exports.approveLead = async (req, res, next) => {
 
             await lead.populate({
                 path: 'investorAllocations.investorId',
-                select: 'name email decidingPercentageMin decidingPercentageMax creditLimit utilizedAmount status'
+                select: 'name email investorEid decidingPercentageMin decidingPercentageMax creditLimit utilizedAmount status'
             });
 
             const normalizedAllocations = normalizeLeadAllocations(lead);
@@ -3292,18 +3300,45 @@ exports.approveLead = async (req, res, next) => {
                 const userRole = req.userRole || 'admin';
                 const userId = req.userId;
 
+                // Calculate final price for PO
+                const purchasedFinalPrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
+                const jobCosting = lead.jobCosting || {};
+                const finalPrice = purchasedFinalPrice +
+                    Number(jobCosting.transferCost || 0) +
+                    Number(jobCosting.detailing_inspection_cost || 0) +
+                    Number(jobCosting.agent_commision || 0) +
+                    Number(jobCosting.car_recovery_cost || 0) +
+                    Number(jobCosting.other_charges || 0);
+
                 // Ensure a Purchase Order exists and is aligned with allocations
+                // Get admin name for prepared_by
+                let preparedByName = '';
+                if (userRole === 'admin') {
+                    try {
+                        const Admin = require('../models/Admin');
+                        const adminUser = await Admin.findById(userId).select('name email');
+                        if (adminUser) {
+                            preparedByName = adminUser.name || adminUser.email || '';
+                        }
+                    } catch (_) {
+                        // no-op if admin lookup fails
+                    }
+                }
+
                 let purchaseOrder = await PurchaseOrder.findOne({ leadId: lead._id });
                 if (!purchaseOrder) {
                     purchaseOrder = await PurchaseOrder.create({
                         leadId: lead._id,
                         investorId: normalizedAllocations[0].investorId || null,
-                        amount: lead.priceAnalysis.purchasedFinalPrice || lead.priceAnalysis.maxSellingPrice,
-                        investorAllocations: normalizedAllocations.map(({ investorId, percentage, amount }) => ({
+                        amount: finalPrice || lead.priceAnalysis.purchasedFinalPrice || lead.priceAnalysis.maxSellingPrice,
+                        total_investment: finalPrice || lead.priceAnalysis.purchasedFinalPrice || lead.priceAnalysis.maxSellingPrice,
+                        investorAllocations: normalizedAllocations.map(({ investorId, ownershipPercentage, percentage, amount, profitPercentage }) => ({
                             investorId,
                             amount,
-                            percentage
+                            ownershipPercentage: ownershipPercentage || percentage,
+                            profitPercentage: profitPercentage || undefined
                         })),
+                        prepared_by: preparedByName,
                         status: 'draft',
                         notes: `Purchase Order for lead ${lead.leadId}`,
                         createdBy: userId,
@@ -3311,10 +3346,16 @@ exports.approveLead = async (req, res, next) => {
                     });
                 } else {
                     purchaseOrder.investorId = normalizedAllocations[0].investorId || null;
-                    purchaseOrder.investorAllocations = normalizedAllocations.map(({ investorId, percentage, amount }) => ({
+                    purchaseOrder.amount = finalPrice || purchaseOrder.amount;
+                    purchaseOrder.total_investment = finalPrice || purchaseOrder.total_investment;
+                    if (preparedByName && !purchaseOrder.prepared_by) {
+                        purchaseOrder.prepared_by = preparedByName;
+                    }
+                    purchaseOrder.investorAllocations = normalizedAllocations.map(({ investorId, ownershipPercentage, percentage, amount, profitPercentage }) => ({
                         investorId,
                         amount,
-                        percentage
+                        ownershipPercentage: ownershipPercentage || percentage,
+                        profitPercentage: profitPercentage || undefined
                     }));
                     await purchaseOrder.save();
                 }
@@ -3344,7 +3385,7 @@ exports.approveLead = async (req, res, next) => {
                     logger.info('DocuSign approval flow - processing allocation:', allocation);
                     try {
                         const investor = allocation.investor || await Investor.findById(allocation.investorId)
-                            .select('name email decidingPercentageMin decidingPercentageMax creditLimit utilizedAmount');
+                            .select('name email investorEid decidingPercentageMin decidingPercentageMax creditLimit utilizedAmount');
                         logger.info('DocuSign approval flow - resolved investor:', {
                             allocationInvestorId: allocation.investorId,
                             investor
@@ -3364,6 +3405,7 @@ exports.approveLead = async (req, res, next) => {
                             priceAnalysis: lead.priceAnalysis,
                             vehicleInfo: lead.vehicleInfo,
                             contactInfo: lead.contactInfo,
+                            jobCosting: lead.jobCosting,
                             purchaseOrder,
                             allocation
                         });

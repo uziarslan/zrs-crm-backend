@@ -127,6 +127,14 @@ const leadSchema = new mongoose.Schema({
             enum: ['Admin', 'Manager']
         }
     },
+    // Job costing fields (moved from PurchaseOrder)
+    jobCosting: {
+        transferCost: { type: Number, default: 0 }, // transfer_cost_rta
+        detailing_inspection_cost: { type: Number, default: 0 },
+        agent_commision: { type: Number, default: 0 },
+        car_recovery_cost: { type: Number, default: 0 },
+        other_charges: { type: Number, default: 0 }
+    },
     investorAllocations: [{
         investorId: {
             type: mongoose.Schema.Types.ObjectId,
@@ -136,12 +144,21 @@ const leadSchema = new mongoose.Schema({
         percentage: {
             type: Number,
             min: 0,
-            max: 100,
-            required: true
+            max: 100
+        },
+        ownershipPercentage: {
+            type: Number,
+            min: 0,
+            max: 100
         },
         amount: {
             type: Number,
             default: 0
+        },
+        profitPercentage: {
+            type: Number,
+            min: 0,
+            max: 100
         }
     }],
     // Simple dual approval tracking (1 from each admin group)
