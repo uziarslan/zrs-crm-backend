@@ -792,6 +792,7 @@ exports.getVehicleById = async (req, res, next) => {
             jobCosting: lead.jobCosting || {},
             attachments: lead.attachments || [],
             contactInfo: lead.contactInfo || {},
+            ownerInfo: lead.ownerInfo || null,
             investor: investorSummary,
             investorAllocation: lead.purchaseOrder?.investorAllocations || [],
             purchaseOrder: lead.purchaseOrder,
@@ -925,6 +926,7 @@ exports.getInventory = async (req, res, next) => {
                 operationalChecklist: lead.operationalChecklist || {},
                 financialChecklist,
                 investor: investorSummary,
+                ownerInfo: lead.ownerInfo || null,
                 createdBy: lead.createdBy,
                 createdAt: lead.createdAt,
                 updatedAt: lead.updatedAt

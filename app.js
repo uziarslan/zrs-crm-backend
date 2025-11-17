@@ -11,6 +11,7 @@ const errorHandler = require('./middleware/errorHandler');
 const authRoutes = require('./routes/authRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const purchaseRoutes = require('./routes/purchaseRoutes');
+const consignmentAgreementRoutes = require('./routes/consignmentAgreementRoutes');
 const salesRoutes = require('./routes/salesRoutes');
 const investorRoutes = require('./routes/investorRoutes');
 const csaRoutes = require('./routes/csaRoutes');
@@ -83,6 +84,7 @@ app.get('/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/v1/admin', adminRoutes);
 app.use('/api/v1/purchases', purchaseRoutes);
+app.use('/api/v1/consignment-agreement', consignmentAgreementRoutes);
 app.use('/api/v1/sales', salesRoutes);
 app.use('/api/v1/investors', investorRoutes);
 app.use('/api/v1/csa', csaRoutes);

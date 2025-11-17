@@ -128,6 +128,13 @@ const leadSchema = new mongoose.Schema({
             enum: ['Admin', 'Manager']
         }
     },
+    ownerInfo: {
+        name: String,
+        contactNumber: String,
+        address: String,
+        emiratesIdOrPassport: String,
+        updatedAt: Date
+    },
     // Job costing fields (moved from PurchaseOrder)
     jobCosting: {
         transferCost: { type: Number, default: 0 }, // transfer_cost_rta
@@ -239,6 +246,9 @@ leadSchema.pre('save', async function (next) {
             }
         }
         this.leadId = `${prefix}${String(nextId).padStart(4, '0')}`;
+    }
+    if (this.isModified('ownerInfo') && this.ownerInfo) {
+        this.ownerInfo.updatedAt = Date.now();
     }
     this.updatedAt = Date.now();
     next();
