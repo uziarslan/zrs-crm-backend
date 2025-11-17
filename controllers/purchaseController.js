@@ -122,9 +122,26 @@ exports.updatePOFields = async (req, res, next) => {
  */
 exports.createLead = async (req, res, next) => {
     try {
+        // Normalize enum values to lowercase
+        const normalizeSource = (source) => {
+            if (!source) return source;
+            const normalized = source.toLowerCase().trim();
+            // Handle special cases
+            if (normalized === 'walk-in' || normalized === 'walkin') return 'walk-in';
+            if (normalized === 'social-media' || normalized === 'socialmedia' || normalized === 'social media') return 'social-media';
+            return normalized;
+        };
+
+        const normalizePriority = (priority) => {
+            if (!priority) return priority;
+            return priority.toLowerCase().trim();
+        };
+
         const leadData = {
             ...req.body,
             type: 'purchase',
+            source: normalizeSource(req.body.source),
+            priority: normalizePriority(req.body.priority),
             assignedTo: req.body.assignedTo || (req.userRole === 'manager' ? req.userId : null),
             createdBy: req.userId,
             createdByModel: req.userRole === 'admin' ? 'Admin' : 'Manager'
@@ -191,6 +208,44 @@ exports.bulkCreateLeads = async (req, res, next) => {
         const createdLeads = [];
         const errors = [];
 
+        // Generate unique leadIds upfront to avoid race conditions
+        // Find the maximum leadId number to ensure no duplicates
+        const prefix = 'PL';
+        const purchaseLeads = await Lead.find(
+            { type: 'purchase', leadId: { $regex: `^${prefix}\\d+$` } },
+            { leadId: 1 }
+        ).lean();
+        
+        let maxId = 0;
+        purchaseLeads.forEach(lead => {
+            if (lead.leadId) {
+                const match = lead.leadId.match(/\d+/);
+                if (match) {
+                    const num = parseInt(match[0]);
+                    if (num > maxId) {
+                        maxId = num;
+                    }
+                }
+            }
+        });
+        
+        let nextId = maxId + 1;
+
+        // Normalize enum values to lowercase
+        const normalizeSource = (source) => {
+            if (!source) return source;
+            const normalized = source.toLowerCase().trim();
+            // Handle special cases
+            if (normalized === 'walk-in' || normalized === 'walkin') return 'walk-in';
+            if (normalized === 'social-media' || normalized === 'socialmedia' || normalized === 'social media') return 'social-media';
+            return normalized;
+        };
+
+        const normalizePriority = (priority) => {
+            if (!priority) return priority;
+            return priority.toLowerCase().trim();
+        };
+
         for (let i = 0; i < leads.length; i++) {
             try {
                 const leadData = leads[i];
@@ -216,15 +271,45 @@ exports.bulkCreateLeads = async (req, res, next) => {
                     }
                 }
 
-                const leadPayload = {
-                    ...leadData,
-                    type: 'purchase',
-                    assignedTo: leadData.assignedTo || null,
-                    createdBy: req.userId,
-                    createdByModel: req.userRole === 'admin' ? 'Admin' : 'Manager'
-                };
+                // Generate unique leadId for this lead with retry logic for duplicates
+                let leadId;
+                let attempts = 0;
+                let created = false;
+                let lead;
+                
+                while (!created && attempts < 10) {
+                    leadId = `${prefix}${String(nextId).padStart(4, '0')}`;
+                    nextId++;
+                    attempts++;
 
-                const lead = await Lead.create(leadPayload);
+                    const leadPayload = {
+                        ...leadData,
+                        leadId, // Assign leadId before creation to skip pre-save hook generation
+                        type: 'purchase',
+                        source: normalizeSource(leadData.source),
+                        priority: normalizePriority(leadData.priority),
+                        assignedTo: leadData.assignedTo || null,
+                        createdBy: req.userId,
+                        createdByModel: req.userRole === 'admin' ? 'Admin' : 'Manager'
+                    };
+
+                    try {
+                        lead = await Lead.create(leadPayload);
+                        created = true;
+                    } catch (createError) {
+                        // If it's a duplicate key error, try next ID
+                        if (createError.code === 11000 && createError.keyPattern?.leadId) {
+                            logger.warn(`Duplicate leadId ${leadId} detected, trying next ID`);
+                            continue;
+                        }
+                        // For other errors, throw immediately
+                        throw createError;
+                    }
+                }
+
+                if (!created) {
+                    throw new Error(`Failed to create lead after ${attempts} attempts due to duplicate leadId conflicts`);
+                }
 
                 // Get assigned manager details if applicable
                 let assignedManager = null;
@@ -2053,6 +2138,21 @@ exports.updateLead = async (req, res, next) => {
             priority: lead.priority
         };
 
+        // Normalize enum values to lowercase
+        const normalizeSource = (source) => {
+            if (!source) return source;
+            const normalized = source.toLowerCase().trim();
+            // Handle special cases
+            if (normalized === 'walk-in' || normalized === 'walkin') return 'walk-in';
+            if (normalized === 'social-media' || normalized === 'socialmedia' || normalized === 'social media') return 'social-media';
+            return normalized;
+        };
+
+        const normalizePriority = (priority) => {
+            if (!priority) return priority;
+            return priority.toLowerCase().trim();
+        };
+
         // Update allowed fields
         if (req.body.contactInfo) {
             lead.contactInfo = { ...lead.contactInfo, ...req.body.contactInfo };
@@ -2060,8 +2160,8 @@ exports.updateLead = async (req, res, next) => {
         if (req.body.vehicleInfo) {
             lead.vehicleInfo = { ...lead.vehicleInfo, ...req.body.vehicleInfo };
         }
-        if (req.body.source) lead.source = req.body.source;
-        if (req.body.priority) lead.priority = req.body.priority;
+        if (req.body.source) lead.source = normalizeSource(req.body.source);
+        if (req.body.priority) lead.priority = normalizePriority(req.body.priority);
 
         await lead.save();
 
