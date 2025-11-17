@@ -1609,7 +1609,7 @@ exports.uploadDocuments = async (req, res, next) => {
         const uploadedDocs = [];
 
         // Handle single file categories
-        ['inspectionReport', 'registrationCard', 'onlineHistoryCheck'].forEach(category => {
+        ['inspectionReport', 'registrationCard'].forEach(category => {
             if (req.files[category] && req.files[category][0]) {
                 const file = req.files[category][0];
                 uploadedDocs.push({
@@ -1626,22 +1626,24 @@ exports.uploadDocuments = async (req, res, next) => {
             }
         });
 
-        // Handle multiple car pictures
-        if (req.files['carPictures']) {
-            req.files['carPictures'].forEach(file => {
-                uploadedDocs.push({
-                    category: 'carPictures',
-                    fileName: file.originalname,
-                    fileType: file.mimetype,
-                    fileSize: file.size,
-                    url: file.path, // Cloudinary URL
-                    publicId: file.filename, // Cloudinary public ID
-                    uploadedBy: req.userId,
-                    uploadedByModel: req.userRole === 'admin' ? 'Admin' : 'Manager',
-                    uploadedAt: new Date()
+        // Handle multiple file categories (carPictures and onlineHistoryCheck)
+        ['carPictures', 'onlineHistoryCheck'].forEach(category => {
+            if (req.files[category]) {
+                req.files[category].forEach(file => {
+                    uploadedDocs.push({
+                        category: category,
+                        fileName: file.originalname,
+                        fileType: file.mimetype,
+                        fileSize: file.size,
+                        url: file.path, // Cloudinary URL
+                        publicId: file.filename, // Cloudinary public ID
+                        uploadedBy: req.userId,
+                        uploadedByModel: req.userRole === 'admin' ? 'Admin' : 'Manager',
+                        uploadedAt: new Date()
+                    });
                 });
-            });
-        }
+            }
+        });
 
         lead.attachments = [...(lead.attachments || []), ...uploadedDocs];
         await lead.save();

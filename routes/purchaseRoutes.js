@@ -226,7 +226,7 @@ router.post(
         { name: 'inspectionReport', maxCount: 1 },
         { name: 'registrationCard', maxCount: 1 },
         { name: 'carPictures', maxCount: 20 },
-        { name: 'onlineHistoryCheck', maxCount: 1 }
+        { name: 'onlineHistoryCheck', maxCount: 20 }
     ]),
     purchaseController.uploadDocuments
 );
