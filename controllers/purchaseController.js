@@ -373,7 +373,11 @@ exports.getLeads = async (req, res, next) => {
         const { status, source, assignedTo, priority, search } = req.query;
 
         // Build query
-        const query = { type: 'purchase' };
+        // For 'sold' status, include both purchase and consignment types
+        // Otherwise, default to purchase only
+        const query = status === 'sold' 
+            ? { type: { $in: ['purchase', 'consignment'] } }
+            : { type: 'purchase' };
 
         if (status) query.status = status;
         if (source) query.source = source;
@@ -401,6 +405,14 @@ exports.getLeads = async (req, res, next) => {
             .populate('followUps')
             // Include minimal PurchaseOrder status so UI can reflect DocuSign completion
             .populate('purchaseOrder', 'docuSignStatus status')
+            .populate({
+                path: 'sellOrder',
+                select: '-pdfContent -pdfSize'
+            })
+            .populate({
+                path: 'sellInvoice',
+                select: '-pdfContent -pdfSize'
+            })
             .sort({ createdAt: -1 });
 
         res.status(200).json({
@@ -435,6 +447,14 @@ exports.getLeadById = async (req, res, next) => {
                 }
             })
             .populate('invoices')
+            .populate({
+                path: 'sellOrder',
+                select: '-pdfContent -pdfSize'
+            })
+            .populate({
+                path: 'sellInvoice',
+                select: '-pdfContent -pdfSize'
+            })
             .populate('investorAllocations.investorId', 'name email decidedPercentageMin decidedPercentageMax creditLimit utilizedAmount');
 
         if (!lead) {
@@ -817,7 +837,11 @@ exports.getVehicleById = async (req, res, next) => {
                     select: 'name email'
                 }
             })
-            .populate('invoices');
+            .populate('invoices')
+            .populate({
+                path: 'sellOrder',
+                select: '-pdfContent -pdfSize'
+            });
 
         if (!lead || (lead.status !== 'inventory' && lead.status !== 'consignment')) {
             return res.status(404).json({

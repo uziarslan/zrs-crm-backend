@@ -95,6 +95,10 @@ exports.getSalesLeads = async (req, res, next) => {
         const leads = await Lead.find(query)
             .populate('assignedTo', 'name email')
             .populate('followUps')
+            .populate({
+                path: 'sellOrder',
+                select: '-pdfContent -pdfSize'
+            })
             .sort({ createdAt: -1 });
 
         res.status(200).json({

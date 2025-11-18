@@ -4,6 +4,7 @@ const InvestorAgreement = require('../models/InvestorAgreement');
 const Admin = require('../models/Admin');
 const Lead = require('../models/Lead');
 const Sale = require('../models/Sale');
+const SellInvoice = require('../models/SellInvoice');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const logger = require('../utils/logger');
 const { logInvestor, logUserManagement } = require('../utils/auditLogger');
@@ -41,10 +42,25 @@ exports.getInvestorSOA = async (req, res, next) => {
         const investments = [];
         for (const investment of investor.investments) {
             const lead = await Lead.findById(investment.leadId);
-            let sale = null;
+            let sellInvoice = null;
 
             if (lead && lead.status === 'sold') {
-                sale = await Sale.findOne({ leadId: lead._id });
+                // Try to get SellInvoice first (new system)
+                if (lead.sellInvoice) {
+                    sellInvoice = await SellInvoice.findById(lead.sellInvoice);
+                }
+                // Fallback to Sale for backward compatibility
+                if (!sellInvoice) {
+                    const sale = await Sale.findOne({ leadId: lead._id });
+                    if (sale) {
+                        // Convert Sale to SellInvoice-like structure for compatibility
+                        sellInvoice = {
+                            createdAt: sale.createdAt,
+                            sellingPrice: sale.sellingPrice,
+                            investorBreakdown: sale.investorBreakdown || []
+                        };
+                    }
+                }
             }
 
             investments.push({
@@ -64,7 +80,8 @@ exports.getInvestorSOA = async (req, res, next) => {
                     askingPrice: lead.vehicleInfo?.askingPrice,
                     purchasePrice: lead.priceAnalysis?.purchasedFinalPrice,
                     minSellingPrice: lead.priceAnalysis?.minSellingPrice,
-                    maxSellingPrice: lead.priceAnalysis?.maxSellingPrice
+                    maxSellingPrice: lead.priceAnalysis?.maxSellingPrice,
+                    soldPrice: lead.soldPrice
                 } : null,
                 images: lead?.attachments?.filter(a => a.category === 'carPictures').map(img => ({
                     url: img.url,
@@ -73,12 +90,21 @@ exports.getInvestorSOA = async (req, res, next) => {
                 investmentDate: investment.date,
                 investmentAmount: investment.amount,
                 investmentPercentage: investment.percentage,
-                status: investment.status,
-                saleDate: sale?.createdAt,
-                saleAmount: sale?.sellingPrice,
-                profitAmount: sale?.investorBreakdown?.find(b => b.investorId.toString() === investorId)?.profitAmount,
-                profitPercentage: sale?.investorBreakdown?.find(b => b.investorId.toString() === investorId)?.profitPercentage,
-                totalReturn: sale?.investorBreakdown?.find(b => b.investorId.toString() === investorId)?.totalPayout
+                status: lead?.status === 'sold' ? 'sold' : investment.status,
+                saleDate: sellInvoice?.createdAt,
+                saleAmount: sellInvoice?.sellingPrice || lead?.soldPrice,
+                profitAmount: sellInvoice?.investorBreakdown?.find(b => {
+                    const bId = b.investorId?._id || b.investorId;
+                    return bId && bId.toString() === investorId;
+                })?.profitAmount,
+                profitPercentage: sellInvoice?.investorBreakdown?.find(b => {
+                    const bId = b.investorId?._id || b.investorId;
+                    return bId && bId.toString() === investorId;
+                })?.profitPercentage,
+                totalReturn: sellInvoice?.investorBreakdown?.find(b => {
+                    const bId = b.investorId?._id || b.investorId;
+                    return bId && bId.toString() === investorId;
+                })?.totalPayout
             });
         }
 
@@ -727,6 +753,13 @@ exports.generateSOA = async (req, res, next) => {
             createdAt: { $gte: new Date(periodStart), $lte: new Date(periodEnd) }
         }).populate('vehicleId');
 
+        // Get sales from SellInvoice (new system)
+        const sellInvoices = await SellInvoice.find({
+            'investorBreakdown.investorId': investorId,
+            createdAt: { $gte: new Date(periodStart), $lte: new Date(periodEnd) }
+        }).populate('lead');
+
+        // Fallback to Sale for backward compatibility
         const sales = await Sale.find({
             'investorBreakdown.investorId': investorId,
             createdAt: { $gte: new Date(periodStart), $lte: new Date(periodEnd) }
@@ -755,7 +788,31 @@ exports.generateSOA = async (req, res, next) => {
             }
         }
 
-        // Add sale transactions
+        // Add sale transactions from SellInvoice (new system)
+        for (const invoice of sellInvoices) {
+            const breakdown = invoice.investorBreakdown.find(
+                b => {
+                    const bId = b.investorId?._id || b.investorId;
+                    return bId && bId.toString() === investorId;
+                }
+            );
+            if (breakdown) {
+                balance -= breakdown.totalPayout;
+                const lead = invoice.lead;
+                transactions.push({
+                    date: invoice.createdAt,
+                    type: 'return',
+                    description: `Return from ${lead?.leadId || 'vehicle'} sale`,
+                    vehicleId: lead?._id,
+                    saleId: invoice._id,
+                    debit: 0,
+                    credit: breakdown.totalPayout,
+                    balance
+                });
+            }
+        }
+
+        // Add sale transactions from Sale (backward compatibility)
         for (const sale of sales) {
             const breakdown = sale.investorBreakdown.find(
                 b => b.investorId.toString() === investorId

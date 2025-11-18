@@ -23,16 +23,12 @@ const leadSchema = new mongoose.Schema({
         type: String,
         enum: [
             'new',
-            'contacted',
-            'qualified',
             'negotiation',
             'inspection',
-            'under_review',
-            'approved',
             'inventory',
             'consignment',
             'sale',
-            'lost',
+            'sold',
             'cancelled'
         ],
         default: 'new'
@@ -93,7 +89,7 @@ const leadSchema = new mongoose.Schema({
     attachments: [{
         category: {
             type: String,
-            enum: ['inspectionReport', 'registrationCard', 'carPictures', 'onlineHistoryCheck', 'consignmentAgreement'],
+            enum: ['inspectionReport', 'registrationCard', 'carPictures', 'onlineHistoryCheck', 'consignmentAgreement', 'sellOrder'],
             required: true
         },
         fileName: String,
@@ -189,6 +185,20 @@ const leadSchema = new mongoose.Schema({
     purchaseOrder: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'PurchaseOrder',
+        default: null
+    },
+    sellOrder: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'SellOrder',
+        default: null
+    },
+    sellInvoice: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'SellInvoice',
+        default: null
+    },
+    soldPrice: {
+        type: Number,
         default: null
     },
     // References to Invoices (one per investor)
