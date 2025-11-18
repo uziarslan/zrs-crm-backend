@@ -1626,8 +1626,8 @@ exports.uploadDocuments = async (req, res, next) => {
             }
         });
 
-        // Handle multiple file categories (carPictures and onlineHistoryCheck)
-        ['carPictures', 'onlineHistoryCheck'].forEach(category => {
+        // Handle multiple file categories (carPictures, onlineHistoryCheck, consignmentAgreement)
+        ['carPictures', 'onlineHistoryCheck', 'consignmentAgreement'].forEach(category => {
             if (req.files[category]) {
                 req.files[category].forEach(file => {
                     uploadedDocs.push({

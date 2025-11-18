@@ -22,6 +22,8 @@ const fileFilter = (req, file, cb) => {
     }
 };
 
+const logger = require('../utils/logger');
+
 const upload = multer({
     storage: storage,
     limits: {
@@ -29,6 +31,25 @@ const upload = multer({
     },
     fileFilter: fileFilter
 });
+
+const handleUploadErrors = (uploadMiddleware) => (req, res, next) => {
+    uploadMiddleware(req, res, (err) => {
+        if (err) {
+            logger.error('File upload error:', err);
+            const message = err?.message?.includes('File too large')
+                ? 'Uploaded file is too large. Maximum size is 10MB.'
+                : err?.message?.includes('Invalid file type')
+                    ? err.message
+                    : 'Failed to upload document(s). Please try again.';
+
+            return res.status(400).json({
+                success: false,
+                message
+            });
+        }
+        next();
+    });
+};
 
 // Lead routes
 router.post(
@@ -222,12 +243,15 @@ router.post(
     authenticate,
     isAdminOrManager,
     mongoIdValidation,
-    upload.fields([
-        { name: 'inspectionReport', maxCount: 1 },
-        { name: 'registrationCard', maxCount: 1 },
-        { name: 'carPictures', maxCount: 20 },
-        { name: 'onlineHistoryCheck', maxCount: 20 }
-    ]),
+    handleUploadErrors(
+        upload.fields([
+            { name: 'inspectionReport', maxCount: 1 },
+            { name: 'registrationCard', maxCount: 1 },
+            { name: 'carPictures', maxCount: 20 },
+            { name: 'onlineHistoryCheck', maxCount: 20 },
+            { name: 'consignmentAgreement', maxCount: 20 }
+        ])
+    ),
     purchaseController.uploadDocuments
 );
 
@@ -275,7 +299,7 @@ router.post(
     authenticate,
     isAdmin,
     mongoIdValidation,
-    upload.single('invoice'),
+    handleUploadErrors(upload.single('invoice')),
     purchaseController.uploadCostInvoiceEvidence
 );
 
