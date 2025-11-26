@@ -47,7 +47,7 @@ exports.createLeadValidation = [
     body('source').isIn(['phone', 'email', 'walk-in', 'website', 'referral', 'social-media', 'other']).withMessage('Invalid source'),
     body('contactInfo.name').notEmpty().withMessage('Contact name is required'),
     body('contactInfo.phone').optional().isMobilePhone().withMessage('Invalid phone number'),
-    body('contactInfo.email').optional().isEmail().withMessage('Invalid email')
+    body('contactInfo.email').optional({ checkFalsy: true }).isEmail().withMessage('Invalid email')
 ];
 
 /**

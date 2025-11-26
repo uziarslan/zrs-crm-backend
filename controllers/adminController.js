@@ -3,6 +3,7 @@ const AdminGroup = require('../models/AdminGroup');
 const Manager = require('../models/Manager');
 const Investor = require('../models/Investor');
 const Sale = require('../models/Sale');
+const SellInvoice = require('../models/SellInvoice');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Lead = require('../models/Lead');
 const AuditLog = require('../models/AuditLog');
@@ -23,15 +24,30 @@ exports.getDashboard = async (req, res, next) => {
         const totalInvestors = await Investor.countDocuments({ status: 'active' });
         const totalVehicles = await Lead.countDocuments({ status: 'inventory' });
         const totalLeads = await Lead.countDocuments();
-        const totalSales = await Sale.countDocuments({ status: { $in: ['approved', 'completed'] } });
+
+        // Prefer SellInvoice for sales metrics (new system), fallback to Sale for backward compatibility
+        const sellInvoiceCount = await SellInvoice.countDocuments();
+        const totalSales = sellInvoiceCount > 0
+            ? sellInvoiceCount
+            : await Sale.countDocuments({ status: { $in: ['approved', 'completed'] } });
 
         // Inventory breakdown - count leads with inventory status
         const inventoryByStatus = [{ _id: 'inventory', count: await Lead.countDocuments({ status: 'inventory' }) }];
 
         // Sales metrics
-        const salesData = await Sale.find({ status: { $in: ['approved', 'completed'] } });
-        const totalRevenue = salesData.reduce((sum, sale) => sum + sale.sellingPrice, 0);
-        const totalProfit = salesData.reduce((sum, sale) => sum + sale.profit, 0);
+        let totalRevenue = 0;
+        let totalProfit = 0;
+
+        if (sellInvoiceCount > 0) {
+            const invoices = await SellInvoice.find({});
+            totalRevenue = invoices.reduce((sum, inv) => sum + (inv.sellingPrice || 0), 0);
+            totalProfit = invoices.reduce((sum, inv) => sum + (inv.totalProfit || 0), 0);
+        } else {
+            // Legacy fallback: use Sale model
+            const salesData = await Sale.find({ status: { $in: ['approved', 'completed'] } });
+            totalRevenue = salesData.reduce((sum, sale) => sum + (sale.sellingPrice || 0), 0);
+            totalProfit = salesData.reduce((sum, sale) => sum + (sale.profit || 0), 0);
+        }
 
         // Pending approvals
         const pendingPOApprovals = await PurchaseOrder.countDocuments({
