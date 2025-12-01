@@ -1633,7 +1633,7 @@ exports.uploadDocuments = async (req, res, next) => {
         const uploadedDocs = [];
 
         // Handle single file categories
-        ['inspectionReport', 'registrationCard'].forEach(category => {
+        ['registrationCard', 'sellOrder', 'sellInvoice'].forEach(category => {
             if (req.files[category] && req.files[category][0]) {
                 const file = req.files[category][0];
                 uploadedDocs.push({
@@ -1650,8 +1650,8 @@ exports.uploadDocuments = async (req, res, next) => {
             }
         });
 
-        // Handle multiple file categories (carPictures, onlineHistoryCheck, consignmentAgreement)
-        ['carPictures', 'onlineHistoryCheck', 'consignmentAgreement'].forEach(category => {
+        // Handle multiple file categories (inspectionReport, carPictures, onlineHistoryCheck, consignmentAgreement)
+        ['inspectionReport', 'carPictures', 'onlineHistoryCheck', 'consignmentAgreement'].forEach(category => {
             if (req.files[category]) {
                 req.files[category].forEach(file => {
                     uploadedDocs.push({

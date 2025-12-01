@@ -245,11 +245,13 @@ router.post(
     mongoIdValidation,
     handleUploadErrors(
         upload.fields([
-            { name: 'inspectionReport', maxCount: 1 },
+            { name: 'inspectionReport', maxCount: 20 },
             { name: 'registrationCard', maxCount: 1 },
             { name: 'carPictures', maxCount: 20 },
             { name: 'onlineHistoryCheck', maxCount: 20 },
-            { name: 'consignmentAgreement', maxCount: 20 }
+            { name: 'consignmentAgreement', maxCount: 20 },
+            { name: 'sellOrder', maxCount: 1 },
+            { name: 'sellInvoice', maxCount: 1 }
         ])
     ),
     purchaseController.uploadDocuments

@@ -89,7 +89,7 @@ const leadSchema = new mongoose.Schema({
     attachments: [{
         category: {
             type: String,
-            enum: ['inspectionReport', 'registrationCard', 'carPictures', 'onlineHistoryCheck', 'consignmentAgreement', 'sellOrder'],
+            enum: ['inspectionReport', 'registrationCard', 'carPictures', 'onlineHistoryCheck', 'consignmentAgreement', 'sellOrder', 'sellInvoice'],
             required: true
         },
         fileName: String,
