@@ -156,10 +156,10 @@ exports.exportLeads = async (req, res, next) => {
             { header: 'Max Selling Price', key: 'maxSellingPrice', width: 18 },
             { header: 'Purchase Price', key: 'purchasePrice', width: 18 },
             { header: 'Transfer Cost', key: 'transferCost', width: 16 },
-            { header: 'Detailing / Inspection Cost', key: 'detailingInspectionCost', width: 24 },
+            { header: 'Detailing Cost', key: 'detailingCost', width: 24 },
             { header: 'Agent Commission', key: 'agentCommission', width: 18 },
             { header: 'Car Recovery Cost', key: 'carRecoveryCost', width: 20 },
-            { header: 'Other Charges', key: 'otherCharges', width: 16 },
+            { header: 'Inspection Cost', key: 'inspectionCost', width: 16 },
             { header: 'Total Cost', key: 'totalCost', width: 18 },
 
             // Metadata
@@ -180,11 +180,11 @@ exports.exportLeads = async (req, res, next) => {
             const jc = lead.jobCosting || {};
             const purchasePrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
             const transferCost = Number(jc.transferCost || 0);
-            const detailingInspectionCost = Number(jc.detailing_inspection_cost || 0);
+            const detailingCost = Number(jc.detailing_cost || 0);
             const agentCommission = Number(jc.agent_commision || 0);
             const carRecoveryCost = Number(jc.car_recovery_cost || 0);
-            const otherCharges = Number(jc.other_charges || 0);
-            const totalCost = purchasePrice + transferCost + detailingInspectionCost + agentCommission + carRecoveryCost + otherCharges;
+            const inspectionCost = Number(jc.inspection_cost || 0);
+            const totalCost = purchasePrice + transferCost + detailingCost + agentCommission + carRecoveryCost + inspectionCost;
 
             worksheet.addRow({
                 // Lead Basic Info
@@ -217,10 +217,10 @@ exports.exportLeads = async (req, res, next) => {
                 maxSellingPrice: lead.priceAnalysis?.maxSellingPrice || '',
                 purchasePrice: purchasePrice || '',
                 transferCost: transferCost || '',
-                detailingInspectionCost: detailingInspectionCost || '',
+                detailingCost: detailingCost || '',
                 agentCommission: agentCommission || '',
                 carRecoveryCost: carRecoveryCost || '',
-                otherCharges: otherCharges || '',
+                inspectionCost: inspectionCost || '',
                 totalCost: totalCost || '',
 
                 // Metadata

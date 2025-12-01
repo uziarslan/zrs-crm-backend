@@ -12,10 +12,10 @@ async function renderInvoiceHtml(invoiceData) {
     const numFields = [
         'buying_price',
         'transfer_cost',
-        'detailing_inspection_cost',
+        'detailing_cost',
         'agent_commission',
         'car_recovery_cost',
-        'other_charges',
+        'inspection_cost',
         'total_amount_payable',
         'invested_amount'
     ];
@@ -173,10 +173,10 @@ exports.generateInvoicePdfBuffer = async (invoiceData) => {
         y = drawTable(doc, doc.page.margins.left, doc.y, [340, 150], [
             ['Buying Price', `AED ${money(invoiceData.buying_price)}`],
             ['Transfer Cost (RTA)', `AED ${money(invoiceData.transfer_cost)}`],
-            ['Detailing / Inspection Cost', `AED ${money(invoiceData.detailing_inspection_cost)}`],
+            ['Detailing Cost', `AED ${money(invoiceData.detailing_cost)}`],
             ['Agent Commission', `AED ${money(invoiceData.agent_commission)}`],
             ['Car Recovery Cost', `AED ${money(invoiceData.car_recovery_cost)}`],
-            ['Other Charges', `AED ${money(invoiceData.other_charges)}`],
+            ['Inspection Cost', `AED ${money(invoiceData.inspection_cost)}`],
             ['Total Amount Payable', `AED ${money(invoiceData.total_amount_payable)}`],
             ['Invested Amount', `AED ${money(invoiceData.invested_amount || invoiceData.total_amount_payable)}`]
         ], { alignRightCols: [1], boldRows: [7] });

@@ -9,10 +9,10 @@ const invoiceSchema = new mongoose.Schema({
     totals: {
         buying_price: { type: Number, default: 0 },
         transfer_cost_rta: { type: Number, default: 0 },
-        detailing_inspection_cost: { type: Number, default: 0 },
+        detailing_cost: { type: Number, default: 0 },
         agent_commission: { type: Number, default: 0 },
         car_recovery_cost: { type: Number, default: 0 },
-        other_charges: { type: Number, default: 0 },
+        inspection_cost: { type: Number, default: 0 },
         total_amount_payable: { type: Number, default: 0 }
     },
     vehicle: {
@@ -46,7 +46,7 @@ const invoiceSchema = new mongoose.Schema({
             },
             uploadedAt: Date
         },
-        detailingInspectionCost: {
+        detailingCost: {
             fileName: String,
             fileType: String,
             fileSize: Number,
@@ -54,7 +54,7 @@ const invoiceSchema = new mongoose.Schema({
             publicId: String,
             uploadedBy: {
                 type: mongoose.Schema.Types.ObjectId,
-                refPath: 'costInvoiceEvidence.detailingInspectionCost.uploadedByModel'
+                refPath: 'costInvoiceEvidence.detailingCost.uploadedByModel'
             },
             uploadedByModel: {
                 type: String,
@@ -94,7 +94,7 @@ const invoiceSchema = new mongoose.Schema({
             },
             uploadedAt: Date
         },
-        otherCharges: {
+        inspectionCost: {
             fileName: String,
             fileType: String,
             fileSize: Number,
@@ -102,7 +102,7 @@ const invoiceSchema = new mongoose.Schema({
             publicId: String,
             uploadedBy: {
                 type: mongoose.Schema.Types.ObjectId,
-                refPath: 'costInvoiceEvidence.otherCharges.uploadedByModel'
+                refPath: 'costInvoiceEvidence.inspectionCost.uploadedByModel'
             },
             uploadedByModel: {
                 type: String,

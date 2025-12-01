@@ -58,10 +58,10 @@ exports.upsertLeadPurchaseOrder = async (req, res, next) => {
         const jobCosting = lead.jobCosting || {};
         const finalPrice = purchasedFinalPrice +
             Number(jobCosting.transferCost || 0) +
-            Number(jobCosting.detailing_inspection_cost || 0) +
+            Number(jobCosting.detailing_cost || 0) +
             Number(jobCosting.agent_commision || 0) +
             Number(jobCosting.car_recovery_cost || 0) +
-            Number(jobCosting.other_charges || 0);
+            Number(jobCosting.inspection_cost || 0);
 
         purchaseOrder.amount = finalPrice;
         purchaseOrder.total_investment = finalPrice;
@@ -215,7 +215,7 @@ exports.bulkCreateLeads = async (req, res, next) => {
             { type: 'purchase', leadId: { $regex: `^${prefix}\\d+$` } },
             { leadId: 1 }
         ).lean();
-        
+
         let maxId = 0;
         purchaseLeads.forEach(lead => {
             if (lead.leadId) {
@@ -228,7 +228,7 @@ exports.bulkCreateLeads = async (req, res, next) => {
                 }
             }
         });
-        
+
         let nextId = maxId + 1;
 
         // Normalize enum values to lowercase
@@ -276,7 +276,7 @@ exports.bulkCreateLeads = async (req, res, next) => {
                 let attempts = 0;
                 let created = false;
                 let lead;
-                
+
                 while (!created && attempts < 10) {
                     leadId = `${prefix}${String(nextId).padStart(4, '0')}`;
                     nextId++;
@@ -375,7 +375,7 @@ exports.getLeads = async (req, res, next) => {
         // Build query
         // For 'sold' status, include both purchase and consignment types
         // Otherwise, default to purchase only
-        const query = status === 'sold' 
+        const query = status === 'sold'
             ? { type: { $in: ['purchase', 'consignment'] } }
             : { type: 'purchase' };
 
@@ -988,10 +988,10 @@ exports.getInventory = async (req, res, next) => {
             const jobCosting = lead.jobCosting || {};
             const requiredCostTypes = [];
             if (jobCosting.transferCost > 0) requiredCostTypes.push('transferCost');
-            if (jobCosting.detailing_inspection_cost > 0) requiredCostTypes.push('detailingInspectionCost');
+            if (jobCosting.detailing_cost > 0) requiredCostTypes.push('detailingCost');
             if (jobCosting.agent_commision > 0) requiredCostTypes.push('agentCommission');
             if (jobCosting.car_recovery_cost > 0) requiredCostTypes.push('carRecoveryCost');
-            if (jobCosting.other_charges > 0) requiredCostTypes.push('otherCharges');
+            if (jobCosting.inspection_cost > 0) requiredCostTypes.push('inspectionCost');
 
             const leadInvoices = invoicesByLeadId.get(lead._id.toString()) || [];
             let financialCompletedItems = 0;
@@ -1200,10 +1200,10 @@ function normalizeLeadAllocations(lead, options = {}) {
         ? Number(options.purchasePrice)
         : (purchasedFinalPrice +
             Number(jobCosting.transferCost || 0) +
-            Number(jobCosting.detailing_inspection_cost || 0) +
+            Number(jobCosting.detailing_cost || 0) +
             Number(jobCosting.agent_commision || 0) +
             Number(jobCosting.car_recovery_cost || 0) +
-            Number(jobCosting.other_charges || 0));
+            Number(jobCosting.inspection_cost || 0));
 
     const allocations = Array.isArray(lead?.investorAllocations)
         ? lead.investorAllocations
@@ -1314,19 +1314,19 @@ function computeInvestorInvoiceShare(allocation, totals) {
     const breakdown = {
         buyingPrice: shareFromPool(buyingPrice),
         transferCost: computeChargeShare('transferCost'),
-        detailingInspectionCost: computeChargeShare('detailingInspectionCost'),
+        detailingCost: computeChargeShare('detailingCost'),
         agentCommission: computeChargeShare('agentCommission'),
         carRecoveryCost: computeChargeShare('carRecoveryCost'),
-        otherCharges: computeChargeShare('otherCharges')
+        inspectionCost: computeChargeShare('inspectionCost')
     };
 
     const computedTotal = roundToCurrency(
         breakdown.buyingPrice +
         breakdown.transferCost +
-        breakdown.detailingInspectionCost +
+        breakdown.detailingCost +
         breakdown.agentCommission +
         breakdown.carRecoveryCost +
-        breakdown.otherCharges
+        breakdown.inspectionCost
     );
 
     const derivedPercentage = totalPayable > 0
@@ -1863,7 +1863,7 @@ exports.uploadCostInvoiceEvidence = async (req, res, next) => {
             });
         }
 
-        const validCostTypes = ['transferCost', 'detailingInspectionCost', 'agentCommission', 'carRecoveryCost', 'otherCharges'];
+        const validCostTypes = ['transferCost', 'detailingCost', 'agentCommission', 'carRecoveryCost', 'inspectionCost'];
         if (!validCostTypes.includes(costType)) {
             return res.status(400).json({
                 success: false,
@@ -1952,7 +1952,7 @@ exports.deleteCostInvoiceEvidence = async (req, res, next) => {
             });
         }
 
-        const validCostTypes = ['transferCost', 'detailingInspectionCost', 'agentCommission', 'carRecoveryCost', 'otherCharges'];
+        const validCostTypes = ['transferCost', 'detailingCost', 'agentCommission', 'carRecoveryCost', 'inspectionCost'];
         if (!validCostTypes.includes(costType)) {
             return res.status(400).json({
                 success: false,
@@ -2073,10 +2073,10 @@ exports.updatePriceAnalysis = async (req, res, next) => {
         if (jobCosting && typeof jobCosting === 'object') {
             lead.jobCosting = {
                 transferCost: jobCosting.transferCost != null ? Number(jobCosting.transferCost) : (lead.jobCosting?.transferCost || 0),
-                detailing_inspection_cost: jobCosting.detailing_inspection_cost != null ? Number(jobCosting.detailing_inspection_cost) : (lead.jobCosting?.detailing_inspection_cost || 0),
+                detailing_cost: jobCosting.detailing_cost != null ? Number(jobCosting.detailing_cost) : (lead.jobCosting?.detailing_cost || 0),
                 agent_commision: jobCosting.agent_commision != null ? Number(jobCosting.agent_commision) : (lead.jobCosting?.agent_commision || 0),
                 car_recovery_cost: jobCosting.car_recovery_cost != null ? Number(jobCosting.car_recovery_cost) : (lead.jobCosting?.car_recovery_cost || 0),
-                other_charges: jobCosting.other_charges != null ? Number(jobCosting.other_charges) : (lead.jobCosting?.other_charges || 0)
+                inspection_cost: jobCosting.inspection_cost != null ? Number(jobCosting.inspection_cost) : (lead.jobCosting?.inspection_cost || 0)
             };
         }
 
@@ -2477,11 +2477,11 @@ exports.convertLeadToVehicle = async (req, res, next) => {
         const buyingPrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
         const jobCosting = lead.jobCosting || {};
         const transferCost = Number(jobCosting.transferCost || 0);
-        const detailingInspectionCost = Number(jobCosting.detailing_inspection_cost || 0);
+        const detailingCost = Number(jobCosting.detailing_cost || 0);
         const agentCommission = Number(jobCosting.agent_commision || 0);
         const carRecoveryCost = Number(jobCosting.car_recovery_cost || 0);
-        const otherCharges = Number(jobCosting.other_charges || 0);
-        const totalPayable = buyingPrice + transferCost + detailingInspectionCost + agentCommission + carRecoveryCost + otherCharges;
+        const inspectionCost = Number(jobCosting.inspection_cost || 0);
+        const totalPayable = buyingPrice + transferCost + detailingCost + agentCommission + carRecoveryCost + inspectionCost;
         const allocationSharesByInvestor = new Map();
         const baseAmountTotal = normalizedAllocations.reduce((sum, allocation) => {
             const value = Number(allocation?.amount) || 0;
@@ -2493,20 +2493,20 @@ exports.convertLeadToVehicle = async (req, res, next) => {
         }, 0);
         const costAssignments = {
             transferCost: purchaseOrder.transferCostInvestor ? purchaseOrder.transferCostInvestor.toString() : null,
-            detailingInspectionCost: purchaseOrder.detailingInspectionCostInvestor ? purchaseOrder.detailingInspectionCostInvestor.toString() : null,
+            detailingCost: purchaseOrder.detailingCostInvestor ? purchaseOrder.detailingCostInvestor.toString() : null,
             agentCommission: purchaseOrder.agentCommissionInvestor ? purchaseOrder.agentCommissionInvestor.toString() : null,
             carRecoveryCost: purchaseOrder.carRecoveryCostInvestor ? purchaseOrder.carRecoveryCostInvestor.toString() : null,
-            otherCharges: purchaseOrder.otherChargesInvestor ? purchaseOrder.otherChargesInvestor.toString() : null
+            inspectionCost: purchaseOrder.inspectionCostInvestor ? purchaseOrder.inspectionCostInvestor.toString() : null
         };
         const shareContext = {
             totalPayable,
             buyingPrice,
             charges: {
                 transferCost,
-                detailingInspectionCost,
+                detailingCost,
                 agentCommission,
                 carRecoveryCost,
-                otherCharges
+                inspectionCost
             },
             costAssignments,
             baseAmountTotal,
@@ -2584,10 +2584,10 @@ exports.convertLeadToVehicle = async (req, res, next) => {
                 totals: {
                     buying_price: breakdown.buyingPrice,
                     transfer_cost_rta: breakdown.transferCost,
-                    detailing_inspection_cost: breakdown.detailingInspectionCost,
+                    detailing_cost: breakdown.detailingCost,
                     agent_commission: breakdown.agentCommission,
                     car_recovery_cost: breakdown.carRecoveryCost,
-                    other_charges: breakdown.otherCharges,
+                    inspection_cost: breakdown.inspectionCost,
                     total_amount_payable: shareInfo.amount
                 },
                 vehicle: {
@@ -2615,10 +2615,10 @@ exports.convertLeadToVehicle = async (req, res, next) => {
                 region: lead.vehicleInfo?.region || '',
                 buyingPrice,
                 transferCost,
-                detailingInspectionCost,
+                detailingCost,
                 agentCommission,
                 carRecoveryCost,
-                otherCharges,
+                inspectionCost,
                 totalAmountPayable: totalPayable,
                 investmentPercentage: shareInfo.percentage,
                 modeOfPayment: modeOfPaymentValue,
@@ -2642,10 +2642,10 @@ exports.convertLeadToVehicle = async (req, res, next) => {
                         chassis_no: invoiceData.chassisNo,
                         buying_price: buyingPrice,
                         transfer_cost: transferCost,
-                        detailing_inspection_cost: detailingInspectionCost,
+                        detailing_cost: detailingCost,
                         agent_commission: agentCommission,
                         car_recovery_cost: carRecoveryCost,
-                        other_charges: otherCharges,
+                        inspection_cost: inspectionCost,
                         total_amount_payable: totalPayable,
                         invested_amount: shareInfo.amount,
                         investment_percentage: invoiceData.investmentPercentage != null
@@ -2846,11 +2846,11 @@ exports.bulkConvertLeadsToVehicles = async (req, res, next) => {
                 const buyingPrice = Number(lead.priceAnalysis?.purchasedFinalPrice || 0);
                 const jobCosting = lead.jobCosting || {};
                 const transferCost = Number(jobCosting.transferCost || 0);
-                const detailingInspectionCost = Number(jobCosting.detailing_inspection_cost || 0);
+                const detailingCost = Number(jobCosting.detailing_cost || 0);
                 const agentCommission = Number(jobCosting.agent_commision || 0);
                 const carRecoveryCost = Number(jobCosting.car_recovery_cost || 0);
-                const otherCharges = Number(jobCosting.other_charges || 0);
-                const totalPayable = buyingPrice + transferCost + detailingInspectionCost + agentCommission + carRecoveryCost + otherCharges;
+                const inspectionCost = Number(jobCosting.inspection_cost || 0);
+                const totalPayable = buyingPrice + transferCost + detailingCost + agentCommission + carRecoveryCost + inspectionCost;
                 const allocationSharesByInvestor = new Map();
                 const baseAmountTotal = normalizedAllocations.reduce((sum, allocation) => {
                     const value = Number(allocation?.amount) || 0;
@@ -2862,20 +2862,20 @@ exports.bulkConvertLeadsToVehicles = async (req, res, next) => {
                 }, 0);
                 const costAssignments = {
                     transferCost: purchaseOrder.transferCostInvestor ? purchaseOrder.transferCostInvestor.toString() : null,
-                    detailingInspectionCost: purchaseOrder.detailingInspectionCostInvestor ? purchaseOrder.detailingInspectionCostInvestor.toString() : null,
+                    detailingCost: purchaseOrder.detailingCostInvestor ? purchaseOrder.detailingCostInvestor.toString() : null,
                     agentCommission: purchaseOrder.agentCommissionInvestor ? purchaseOrder.agentCommissionInvestor.toString() : null,
                     carRecoveryCost: purchaseOrder.carRecoveryCostInvestor ? purchaseOrder.carRecoveryCostInvestor.toString() : null,
-                    otherCharges: purchaseOrder.otherChargesInvestor ? purchaseOrder.otherChargesInvestor.toString() : null
+                    inspectionCost: purchaseOrder.inspectionCostInvestor ? purchaseOrder.inspectionCostInvestor.toString() : null
                 };
                 const shareContext = {
                     totalPayable,
                     buyingPrice,
                     charges: {
                         transferCost,
-                        detailingInspectionCost,
+                        detailingCost,
                         agentCommission,
                         carRecoveryCost,
-                        otherCharges
+                        inspectionCost
                     },
                     costAssignments,
                     baseAmountTotal,
@@ -2950,10 +2950,10 @@ exports.bulkConvertLeadsToVehicles = async (req, res, next) => {
                         totals: {
                             buying_price: breakdown.buyingPrice,
                             transfer_cost_rta: breakdown.transferCost,
-                            detailing_inspection_cost: breakdown.detailingInspectionCost,
+                            detailing_cost: breakdown.detailingCost,
                             agent_commission: breakdown.agentCommission,
                             car_recovery_cost: breakdown.carRecoveryCost,
-                            other_charges: breakdown.otherCharges,
+                            inspection_cost: breakdown.inspectionCost,
                             total_amount_payable: shareInfo.amount
                         },
                         vehicle: {
@@ -2981,10 +2981,10 @@ exports.bulkConvertLeadsToVehicles = async (req, res, next) => {
                         region: lead.vehicleInfo?.region || '',
                         buyingPrice,
                         transferCost,
-                        detailingInspectionCost,
+                        detailingCost,
                         agentCommission,
                         carRecoveryCost,
-                        otherCharges,
+                        inspectionCost,
                         totalAmountPayable: totalPayable,
                         investmentPercentage: shareInfo.percentage,
                         modeOfPayment: modeOfPaymentValue,
@@ -3008,10 +3008,10 @@ exports.bulkConvertLeadsToVehicles = async (req, res, next) => {
                                 chassis_no: invoiceData.chassisNo,
                                 buying_price: buyingPrice,
                                 transfer_cost: transferCost,
-                                detailing_inspection_cost: detailingInspectionCost,
+                                detailing_cost: detailingCost,
                                 agent_commission: agentCommission,
                                 car_recovery_cost: carRecoveryCost,
-                                other_charges: otherCharges,
+                                inspection_cost: inspectionCost,
                                 total_amount_payable: totalPayable,
                                 invested_amount: shareInfo.amount,
                                 investment_percentage: invoiceData.investmentPercentage != null
@@ -3206,10 +3206,10 @@ exports.assignInvestorToLead = async (req, res, next) => {
         const jobCosting = lead.jobCosting || {};
         const finalPrice = purchasedFinalPrice +
             Number(jobCosting.transferCost || 0) +
-            Number(jobCosting.detailing_inspection_cost || 0) +
+            Number(jobCosting.detailing_cost || 0) +
             Number(jobCosting.agent_commision || 0) +
             Number(jobCosting.car_recovery_cost || 0) +
-            Number(jobCosting.other_charges || 0);
+            Number(jobCosting.inspection_cost || 0);
 
         let totalOwnershipPercentage = 0;
 
@@ -3359,8 +3359,8 @@ exports.submitLeadForApproval = async (req, res, next) => {
 
         // Validate job costing complete
         const jc = lead.jobCosting || {};
-        if (!jc.transferCost || !jc.detailing_inspection_cost) {
-            return res.status(400).json({ success: false, message: 'Job costing incomplete. Transfer Cost and Detailing/Inspection Cost are required.' });
+        if (!jc.transferCost || !jc.detailing_cost) {
+            return res.status(400).json({ success: false, message: 'Job costing incomplete. Transfer Cost and Detailing Cost are required.' });
         }
 
         // Validate investor assigned
@@ -3477,10 +3477,10 @@ exports.approveLead = async (req, res, next) => {
                 const jobCosting = lead.jobCosting || {};
                 const finalPrice = purchasedFinalPrice +
                     Number(jobCosting.transferCost || 0) +
-                    Number(jobCosting.detailing_inspection_cost || 0) +
+                    Number(jobCosting.detailing_cost || 0) +
                     Number(jobCosting.agent_commision || 0) +
                     Number(jobCosting.car_recovery_cost || 0) +
-                    Number(jobCosting.other_charges || 0);
+                    Number(jobCosting.inspection_cost || 0);
 
                 // Ensure a Purchase Order exists and is aligned with allocations
                 // Get admin name for prepared_by

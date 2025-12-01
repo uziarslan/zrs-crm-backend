@@ -79,7 +79,7 @@ exports.generateSellInvoicePdf = async (data) => {
         transferCost,
         insurance,
         bankFinanceFee,
-        otherCharges,
+        inspectionCost,
         totalInvoiceValue,
         paymentMode,
         bookingAmountReceived,
@@ -230,7 +230,7 @@ exports.generateSellInvoicePdf = async (data) => {
             ['Transfer Cost (RTA)', currency(transferCost)],
             ['Insurance Assistance (if any)', currency(insurance)],
             ['Bank Finance Fee (if applicable)', currency(bankFinanceFee)],
-            ['Other Charges (if any)', currency(otherCharges)],
+            ['Inspection Cost (if any)', currency(inspectionCost)],
             ['Total Invoice Value', currency(totalInvoiceValue)]
         ];
 

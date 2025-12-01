@@ -134,10 +134,10 @@ const leadSchema = new mongoose.Schema({
     // Job costing fields (moved from PurchaseOrder)
     jobCosting: {
         transferCost: { type: Number, default: 0 }, // transfer_cost_rta
-        detailing_inspection_cost: { type: Number, default: 0 },
+        detailing_cost: { type: Number, default: 0 },
         agent_commision: { type: Number, default: 0 },
         car_recovery_cost: { type: Number, default: 0 },
-        other_charges: { type: Number, default: 0 }
+        inspection_cost: { type: Number, default: 0 }
     },
     investorAllocations: [{
         investorId: {

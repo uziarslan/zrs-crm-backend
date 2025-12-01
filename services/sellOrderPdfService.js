@@ -77,7 +77,7 @@ exports.generateSellOrderPdf = async (data) => {
         transferCost,
         insurance,
         bankFinanceFee,
-        otherCharges,
+        inspectionCost,
         totalPayable,
         paymentMode,
         bookingAmount,
@@ -222,7 +222,7 @@ exports.generateSellOrderPdf = async (data) => {
             [transferLabel, currency(transferCost?.amount)],
             [insuranceLabel, currency(insurance?.amount)],
             ['Bank Finance Fee', currency(bankFinanceFee)],
-            ['Other Charges', currency(otherCharges)],
+            ['Inspection Cost', currency(inspectionCost)],
             ['Total Payable', currency(totalPayable)]
         ];
 

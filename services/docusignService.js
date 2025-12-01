@@ -9,7 +9,34 @@ const logger = require('../utils/logger');
 class DocuSignService {
     constructor() {
         this.apiClient = new docusign.ApiClient();
-        this.apiClient.setBasePath(process.env.DOCUSIGN_BASE_URI || 'https://demo.docusign.net/restapi');
+        this.apiClient.setBasePath(`${this.getRestBaseUri()}/restapi`);
+    }
+
+    /**
+     * Resolve the DocuSign REST base URI (cluster) from env
+     */
+    getRestBaseUri() {
+        const baseUri = (process.env.DOCUSIGN_BASE_URI || 'https://demo.docusign.net').trim();
+        return baseUri.replace(/\/restapi\/?$/i, '');
+    }
+
+    /**
+     * Resolve the OAuth base path for JWT token requests
+     */
+    getOAuthBasePath() {
+        if (process.env.DOCUSIGN_OAUTH_BASE_URI) {
+            return process.env.DOCUSIGN_OAUTH_BASE_URI
+                .replace(/^https?:\/\//i, '')
+                .replace(/\/+/g, '')
+                .toLowerCase();
+        }
+
+        const baseUri = (process.env.DOCUSIGN_BASE_URI || '').toLowerCase();
+        if (baseUri.includes('na') || baseUri.includes('eu') || baseUri.includes('docusign.net') && !baseUri.includes('demo')) {
+            return 'account.docusign.com';
+        }
+
+        return 'account-d.docusign.com';
     }
 
     /**
@@ -53,8 +80,8 @@ class DocuSignService {
                         // Costs
                         { tabLabel: 'buying_price', value: String(invoiceData.buyingPrice ?? '') },
                         { tabLabel: 'transfer_cost', value: String(invoiceData.transferCost ?? '') },
-                        { tabLabel: 'detailing_inspection_cost', value: String(invoiceData.detailingInspectionCost ?? '') },
-                        { tabLabel: 'other_charges', value: String(invoiceData.otherCharges ?? '') },
+                        { tabLabel: 'detailing_cost', value: String(invoiceData.detailingCost ?? '') },
+                        { tabLabel: 'inspection_cost', value: String(invoiceData.inspectionCost ?? '') },
                         { tabLabel: 'total_amount_payable', value: String(invoiceData.totalAmountPayable ?? '') },
 
                         // Payment
@@ -86,7 +113,7 @@ class DocuSignService {
         try {
             // Create a fresh API client for token request
             const tokenApiClient = new docusign.ApiClient();
-            tokenApiClient.setBasePath((process.env.DOCUSIGN_BASE_URI || 'https://demo.docusign.net') + '/restapi');
+            tokenApiClient.setOAuthBasePath(this.getOAuthBasePath());
 
             // Handle private key format - ensure proper line breaks
             let privateKey = process.env.DOCUSIGN_PRIVATE_KEY;
@@ -245,11 +272,7 @@ class DocuSignService {
 
             // Create a fresh API client for this request
             const apiClient = new docusign.ApiClient();
-            // Use sandbox for development to avoid envelope limits
-            const baseUri = process.env.NODE_ENV === 'development'
-                ? 'https://demo.docusign.net'
-                : (process.env.DOCUSIGN_BASE_URI || 'https://demo.docusign.net');
-            apiClient.setBasePath(baseUri + '/restapi');
+            apiClient.setBasePath(`${this.getRestBaseUri()}/restapi`);
             apiClient.addDefaultHeader('Authorization', `Bearer ${accessToken}`);
 
             const envelopesApi = new docusign.EnvelopesApi(apiClient);
@@ -288,7 +311,7 @@ class DocuSignService {
             // Add template variables (custom fields in your DocuSign template)
             // Map provided PO fields to template tabs exactly as requested
             const fmt = (v) => (v == null || v === '') ? 'N/A' : String(v);
-            
+
             // Helper function to format numbers with commas
             const fmtNumber = (v) => {
                 if (v == null || v === '') return 'N/A';
@@ -296,7 +319,7 @@ class DocuSignService {
                 if (isNaN(num)) return String(v);
                 return num.toLocaleString('en-US');
             };
-            
+
             // Helper function to format percentage with % sign
             const fmtPercentage = (v) => {
                 if (v == null || v === '') return 'N/A';
@@ -304,7 +327,7 @@ class DocuSignService {
                 if (isNaN(num)) return String(v);
                 return `${num.toLocaleString('en-US')}%`;
             };
-            
+
             // Helper function to format mileage with Km suffix
             const fmtMileage = (v) => {
                 if (v == null || v === '') return 'N/A';
@@ -312,37 +335,37 @@ class DocuSignService {
                 if (isNaN(num)) return String(v);
                 return `${num.toLocaleString('en-US')} Km`;
             };
-            
+
             // Calculate total car price (buying price + all job costs)
             const buyingPrice = Number(priceAnalysis?.purchasedFinalPrice || 0);
             const transferCost = Number(jobCosting?.transferCost || 0);
-            const detailingCost = Number(jobCosting?.detailing_inspection_cost || 0);
+            const detailingCost = Number(jobCosting?.detailing_cost || 0);
             const agentCommission = Number(jobCosting?.agent_commision || 0);
             const carRecoveryCost = Number(jobCosting?.car_recovery_cost || 0);
-            const otherCharges = Number(jobCosting?.other_charges || 0);
-            const totalCarPrice = buyingPrice + transferCost + detailingCost + agentCommission + carRecoveryCost + otherCharges;
-            
+            const inspectionCost = Number(jobCosting?.inspection_cost || 0);
+            const totalCarPrice = buyingPrice + transferCost + detailingCost + agentCommission + carRecoveryCost + inspectionCost;
+
             // Get investment amount and percentage from allocation
             const investmentAmount = allocation?.amount || 0;
             const investmentPercentage = allocation?.ownershipPercentage || allocation?.percentage || 0;
-            
+
             templateRole.tabs = {
                 textTabs: [
                     // 1. purchase_order_no
                     { tabLabel: 'purchase_order_no', value: fmt(purchaseOrder?.poId) },
-                    
+
                     // 2. date
                     { tabLabel: 'date', value: fmt(new Date().toLocaleDateString()) },
-                    
+
                     // 3. investor_name
                     { tabLabel: 'investor_name', value: fmt(investor?.name) },
-                    
+
                     // 4. investor_eid
                     { tabLabel: 'investor_eid', value: fmt(investor?.investorEid) },
-                    
+
                     // 5. prepared_by
                     { tabLabel: 'prepared_by', value: fmt(purchaseOrder?.prepared_by) },
-                    
+
                     // 6-13. Car details
                     { tabLabel: 'car_make', value: fmt(vehicleInfo?.make) },
                     { tabLabel: 'car_model', value: fmt(vehicleInfo?.model) },
@@ -352,20 +375,20 @@ class DocuSignService {
                     { tabLabel: 'car_year', value: fmt(vehicleInfo?.year) },
                     { tabLabel: 'car_region', value: fmt(vehicleInfo?.region) },
                     { tabLabel: 'car_chassis', value: fmt(vehicleInfo?.vin) },
-                    
+
                     // 13. buying_price
                     { tabLabel: 'buying_price', value: fmtNumber(buyingPrice) },
-                    
+
                     // 14-18. Job costing (from lead.jobCosting)
                     { tabLabel: 'transfer_cost_rta', value: fmtNumber(transferCost) },
-                    { tabLabel: 'detailing_inspection_cost', value: fmtNumber(detailingCost) },
+                    { tabLabel: 'detailing_cost', value: fmtNumber(detailingCost) },
                     { tabLabel: 'agent_commision', value: fmtNumber(agentCommission) },
                     { tabLabel: 'car_recovery_cost', value: fmtNumber(carRecoveryCost) },
-                    { tabLabel: 'other_charges', value: fmtNumber(otherCharges) },
-                    
+                    { tabLabel: 'inspection_cost', value: fmtNumber(inspectionCost) },
+
                     // 19. total_car_price (buying_price + all job costs)
                     { tabLabel: 'total_car_price', value: fmtNumber(totalCarPrice) },
-                    
+
                     // 20-21. Investment details (from allocation)
                     { tabLabel: 'investment_amount', value: fmtNumber(investmentAmount) },
                     { tabLabel: 'investment_percentage', value: fmtPercentage(investmentPercentage) }
@@ -444,10 +467,7 @@ class DocuSignService {
 
             // Create a fresh API client for this request
             const apiClient = new docusign.ApiClient();
-            const baseUri = process.env.NODE_ENV === 'development'
-                ? 'https://demo.docusign.net'
-                : (process.env.DOCUSIGN_BASE_URI || 'https://demo.docusign.net');
-            apiClient.setBasePath(baseUri + '/restapi');
+            apiClient.setBasePath(`${this.getRestBaseUri()}/restapi`);
             apiClient.addDefaultHeader('Authorization', `Bearer ${accessToken}`);
 
             const envelopesApi = new docusign.EnvelopesApi(apiClient);
@@ -515,7 +535,7 @@ class DocuSignService {
                 // Admin fields (populated but admin doesn't sign)
                 { tabLabel: 'admin_name', value: fmt(adminName) },
                 { tabLabel: 'designation', value: fmt(adminDesignation) },
-                
+
                 // Investor fields
                 { tabLabel: 'decided_percentage', value: decidedPercentage },
                 { tabLabel: 'investor_name', value: fmt(investorName) },
@@ -644,11 +664,7 @@ class DocuSignService {
 
             // Create a fresh API client for this request
             const apiClient = new docusign.ApiClient();
-            // Use sandbox for development to avoid envelope limits
-            const baseUri = process.env.NODE_ENV === 'development'
-                ? 'https://demo.docusign.net'
-                : (process.env.DOCUSIGN_BASE_URI || 'https://demo.docusign.net');
-            apiClient.setBasePath(baseUri + '/restapi');
+            apiClient.setBasePath(`${this.getRestBaseUri()}/restapi`);
             apiClient.addDefaultHeader('Authorization', `Bearer ${accessToken}`);
 
             const envelopesApi = new docusign.EnvelopesApi(apiClient);

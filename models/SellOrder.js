@@ -88,7 +88,7 @@ const sellOrderSchema = new mongoose.Schema({
         type: Number,
         default: 0
     },
-    otherCharges: {
+    inspectionCost: {
         type: Number,
         default: 0
     },

@@ -112,10 +112,10 @@ exports.createSellInvoice = async (req, res, next) => {
         const jobCosting = lead.jobCosting || {};
         const totalCost = purchasedFinalPrice +
             (jobCosting.transferCost || 0) +
-            (jobCosting.detailing_inspection_cost || 0) +
+            (jobCosting.detailing_cost || 0) +
             (jobCosting.agent_commision || 0) +
             (jobCosting.car_recovery_cost || 0) +
-            (jobCosting.other_charges || 0);
+            (jobCosting.inspection_cost || 0);
 
         // Calculate total profit
         const sellingPrice = sellOrder.sellingPrice;
@@ -210,7 +210,7 @@ exports.createSellInvoice = async (req, res, next) => {
             transferCost: transferCostAmount,
             insurance: insuranceAmount,
             bankFinanceFee: sellOrder.bankFinanceFee || 0,
-            otherCharges: sellOrder.otherCharges || 0,
+            inspectionCost: sellOrder.inspectionCost || 0,
             totalInvoiceValue: sellOrder.totalPayable,
             paymentMode: paymentMode || sellOrder.paymentMode,
             bookingAmountReceived: bookingAmount,
@@ -241,7 +241,7 @@ exports.createSellInvoice = async (req, res, next) => {
             transferCost: transferCostAmount,
             insurance: insuranceAmount,
             bankFinanceFee: sellOrder.bankFinanceFee || 0,
-            otherCharges: sellOrder.otherCharges || 0,
+            inspectionCost: sellOrder.inspectionCost || 0,
             totalInvoiceValue: sellOrder.totalPayable,
             paymentMode: paymentMode || sellOrder.paymentMode,
             bookingAmountReceived: bookingAmount,

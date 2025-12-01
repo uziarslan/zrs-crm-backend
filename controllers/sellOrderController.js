@@ -46,7 +46,7 @@ exports.createSellOrder = async (req, res, next) => {
             insuranceInclusion,
             insuranceAmount,
             bankFinanceFee,
-            otherCharges,
+            inspectionCost,
             paymentMode,
             bookingAmount
         } = req.body;
@@ -86,7 +86,7 @@ exports.createSellOrder = async (req, res, next) => {
         let parsedTransferCost;
         let parsedInsurance;
         let parsedBankFinanceFee;
-        let parsedOtherCharges;
+        let parsedInspectionCost;
         let parsedBookingAmount;
 
         try {
@@ -94,7 +94,7 @@ exports.createSellOrder = async (req, res, next) => {
             parsedTransferCost = parseAmount(transferCostAmount);
             parsedInsurance = parseAmount(insuranceAmount);
             parsedBankFinanceFee = parseAmount(bankFinanceFee);
-            parsedOtherCharges = parseAmount(otherCharges);
+            parsedInspectionCost = parseAmount(inspectionCost);
             parsedBookingAmount = parseAmount(bookingAmount);
         } catch (err) {
             return res.status(400).json({
@@ -103,7 +103,7 @@ exports.createSellOrder = async (req, res, next) => {
             });
         }
 
-        const totalPayable = parsedSellingPrice + parsedTransferCost + parsedInsurance + parsedBankFinanceFee + parsedOtherCharges;
+        const totalPayable = parsedSellingPrice + parsedTransferCost + parsedInsurance + parsedBankFinanceFee + parsedInspectionCost;
         const balanceAmount = Math.max(totalPayable - parsedBookingAmount, 0);
 
         const vehicleInfo = lead.vehicleInfo || {};
@@ -141,7 +141,7 @@ exports.createSellOrder = async (req, res, next) => {
                 amount: parsedInsurance
             },
             bankFinanceFee: parsedBankFinanceFee,
-            otherCharges: parsedOtherCharges,
+            inspectionCost: parsedInspectionCost,
             totalPayable,
             paymentMode,
             bookingAmount: parsedBookingAmount,
@@ -172,7 +172,7 @@ exports.createSellOrder = async (req, res, next) => {
                 amount: parsedInsurance
             },
             bankFinanceFee: parsedBankFinanceFee,
-            otherCharges: parsedOtherCharges,
+            inspectionCost: parsedInspectionCost,
             totalPayable,
             paymentMode,
             bookingAmount: parsedBookingAmount,

@@ -161,9 +161,9 @@ router.put(
             if (!Array.isArray(value)) return false;
             if (value.length === 0) return true;
             return value.every((item) => {
-                return item && 
-                       item.investorId && 
-                       (item.percentage !== undefined || item.ownershipPercentage !== undefined);
+                return item &&
+                    item.investorId &&
+                    (item.percentage !== undefined || item.ownershipPercentage !== undefined);
             });
         })
         .withMessage('Each investor allocation must include investorId and percentage (or ownershipPercentage)'),
@@ -280,15 +280,15 @@ router.put(
     isAdmin,
     mongoIdValidation,
     body('transferCost').notEmpty().isFloat({ min: 0 }).withMessage('transferCost is required'),
-    body('detailing_inspection_cost').notEmpty().isFloat({ min: 0 }).withMessage('detailing_inspection_cost is required'),
+    body('detailing_cost').notEmpty().isFloat({ min: 0 }).withMessage('detailing_cost is required'),
     body('agent_commision').optional({ values: 'falsy' }).isFloat({ min: 0 }),
     body('car_recovery_cost').optional({ values: 'falsy' }).isFloat({ min: 0 }),
-    body('other_charges').optional({ values: 'falsy' }).isFloat({ min: 0 }),
+    body('inspection_cost').optional({ values: 'falsy' }).isFloat({ min: 0 }),
     body('transferCostInvestor').optional({ values: 'falsy' }).isMongoId().withMessage('transferCostInvestor must be a valid investor ID'),
-    body('detailingInspectionCostInvestor').optional({ values: 'falsy' }).isMongoId().withMessage('detailingInspectionCostInvestor must be a valid investor ID'),
+    body('detailingCostInvestor').optional({ values: 'falsy' }).isMongoId().withMessage('detailingCostInvestor must be a valid investor ID'),
     body('agentCommissionInvestor').optional({ values: 'falsy' }).isMongoId().withMessage('agentCommissionInvestor must be a valid investor ID'),
     body('carRecoveryCostInvestor').optional({ values: 'falsy' }).isMongoId().withMessage('carRecoveryCostInvestor must be a valid investor ID'),
-    body('otherChargesInvestor').optional({ values: 'falsy' }).isMongoId().withMessage('otherChargesInvestor must be a valid investor ID'),
+    body('inspectionCostInvestor').optional({ values: 'falsy' }).isMongoId().withMessage('inspectionCostInvestor must be a valid investor ID'),
     validate,
     purchaseController.upsertLeadPurchaseOrder
 );
