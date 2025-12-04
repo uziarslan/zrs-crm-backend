@@ -4,7 +4,7 @@ const webhookController = require('../controllers/webhookController');
 
 // Webhooks are public (no authentication) but should verify signatures in production
 
-router.post('/docusign', webhookController.docusignWebhook);
+router.post('/zohosign', webhookController.zohoSignWebhook);
 router.post('/quickbooks', webhookController.quickbooksWebhook);
 router.post('/teams', webhookController.teamsWebhook);
 

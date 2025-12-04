@@ -78,9 +78,9 @@ const purchaseOrderSchema = new mongoose.Schema({
         name: String,
         fileType: String,
         fileSize: Number,
-        // Base64 content of the PDF returned by DocuSign (used for inline viewing)
+        // Base64 content of the PDF returned by Zoho Sign (used for inline viewing)
         content: String,
-        // Optional DocuSign uri reference
+        // Optional Zoho Sign uri reference
         uri: String,
         sourceEnvelopeId: String,
         investorId: {

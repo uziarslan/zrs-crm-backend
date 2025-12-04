@@ -23,13 +23,12 @@ router.get(
 
 router.get('/ms-graph/callback', integrationController.msGraphCallback);
 
-// DocuSign routes
-router.get('/docusign/callback', integrationController.docusignCallback);
+// Zoho Sign routes
 router.post(
-    '/docusign/send-po/:poId',
+    '/sign/send-po/:poId',
     authenticate,
     isAdminOrManager,
-    integrationController.sendDocuSignPO
+    integrationController.sendZohoSignPO
 );
 
 // Teams calendar

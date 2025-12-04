@@ -13,7 +13,7 @@ const investorAgreementSchema = new mongoose.Schema({
     },
     envelopeId: {
         type: String,
-        required: [true, 'DocuSign envelope ID is required'],
+        required: [true, 'Zoho Sign request ID is required'],
         unique: true
     },
     status: {

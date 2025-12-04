@@ -101,9 +101,9 @@ const logger = require('../utils/logger');
 const { sendNotificationEmail } = require('../utils/emailService');
 const { logLead, logPurchaseOrder, logInventory, logApproval } = require('../utils/auditLogger');
 const AdminGroup = require('../models/AdminGroup');
-const docusignService = require('../services/docusignService');
+const zohoSignService = require('../services/zohoSignService');
 /**
- * @desc    Update Purchase Order fields to be used in DocuSign template
+ * @desc    Update Purchase Order fields to be used in Zoho Sign template
  * @route   PUT /api/v1/purchases/leads/:id/po-fields
  * @access  Private (Admin, Manager)
  */
@@ -403,7 +403,7 @@ exports.getLeads = async (req, res, next) => {
             .populate('assignedTo', 'name email')
             .populate('createdBy', 'name email')
             .populate('followUps')
-            // Include minimal PurchaseOrder status so UI can reflect DocuSign completion
+            // Include minimal PurchaseOrder status so UI can reflect Zoho Sign completion
             .populate('purchaseOrder', 'docuSignStatus status')
             .populate({
                 path: 'sellOrder',
@@ -2396,7 +2396,7 @@ exports.declineLeadApproval = async (req, res, next) => {
 };
 
 /**
- * @desc    Convert lead to vehicle (manual purchase after DocuSign signing)
+ * @desc    Convert lead to vehicle (manual purchase after Zoho Sign signing)
  * @route   POST /api/v1/purchases/leads/:id/purchase
  * @access  Private (Admin only)
  */
@@ -2410,7 +2410,7 @@ exports.convertLeadToVehicle = async (req, res, next) => {
             return res.status(404).json({ success: false, message: 'Lead not found' });
         }
 
-        // Check if lead has a purchase order and DocuSign agreement is signed
+        // Check if lead has a purchase order and Zoho Sign agreement is signed
         if (!lead.purchaseOrder) {
             return res.status(400).json({
                 success: false,
@@ -3464,10 +3464,10 @@ exports.approveLead = async (req, res, next) => {
             });
 
             const normalizedAllocations = normalizeLeadAllocations(lead);
-            logger.info('DocuSign approval flow - normalized allocations:', normalizedAllocations);
+            logger.info('Zoho Sign approval flow - normalized allocations:', normalizedAllocations);
 
             if (normalizedAllocations.length === 0) {
-                logger.warn(`Lead ${lead.leadId} approved but has no investor allocations; skipping DocuSign`);
+                logger.warn(`Lead ${lead.leadId} approved but has no investor allocations; skipping Zoho Sign`);
             } else {
                 const userRole = req.userRole || 'admin';
                 const userId = req.userId;
@@ -3550,28 +3550,28 @@ exports.approveLead = async (req, res, next) => {
                 await lead.save();
 
                 const now = new Date();
-                const docuSignResults = [];
-                const docuSignErrors = [];
+                const zohoSignResults = [];
+                const zohoSignErrors = [];
 
                 for (const allocation of normalizedAllocations) {
-                    logger.info('DocuSign approval flow - processing allocation:', allocation);
+                    logger.info('Zoho Sign approval flow - processing allocation:', allocation);
                     try {
                         const investor = allocation.investor || await Investor.findById(allocation.investorId)
                             .select('name email investorEid decidingPercentageMin decidingPercentageMax creditLimit utilizedAmount');
-                        logger.info('DocuSign approval flow - resolved investor:', {
+                        logger.info('Zoho Sign approval flow - resolved investor:', {
                             allocationInvestorId: allocation.investorId,
                             investor
                         });
                         if (!investor || !investor.email) {
-                            logger.warn(`Skipping DocuSign for allocation ${allocation.investorId} on lead ${lead.leadId}: missing investor email`);
-                            docuSignErrors.push({
+                            logger.warn(`Skipping Zoho Sign for allocation ${allocation.investorId} on lead ${lead.leadId}: missing investor email`);
+                            zohoSignErrors.push({
                                 investorId: allocation.investorId,
                                 reason: 'missing_email'
                             });
                             continue;
                         }
 
-                        const envelope = await docusignService.createLeadPurchaseAgreement({
+                        const envelope = await zohoSignService.createLeadPurchaseAgreement({
                             leadId: lead.leadId,
                             investor,
                             priceAnalysis: lead.priceAnalysis,
@@ -3582,30 +3582,30 @@ exports.approveLead = async (req, res, next) => {
                             allocation
                         });
 
-                        docuSignResults.push({
+                        zohoSignResults.push({
                             investorId: allocation.investorId,
                             investorName: investor.name,
                             investorEmail: investor.email,
-                            envelopeId: envelope.envelopeId,
+                            envelopeId: envelope.requestId,
                             status: (envelope.status || 'sent').toLowerCase(),
                             sentAt: now
                         });
-                    } catch (docuSignError) {
-                        logger.error(`Failed to send DocuSign envelope for lead ${lead.leadId} allocation ${allocation.investorId}:`, docuSignError);
-                        docuSignErrors.push({
+                    } catch (zohoError) {
+                        logger.error(`Failed to send Zoho Sign request for lead ${lead.leadId} allocation ${allocation.investorId}:`, zohoError);
+                        zohoSignErrors.push({
                             investorId: allocation.investorId,
-                            reason: docuSignError.message
+                            reason: zohoError.message
                         });
                     }
                 }
 
-                if (docuSignResults.length > 0) {
-                    purchaseOrder.docuSignEnvelopeId = docuSignResults[0].envelopeId;
+                if (zohoSignResults.length > 0) {
+                    purchaseOrder.docuSignEnvelopeId = zohoSignResults[0].envelopeId;
                     purchaseOrder.docuSignStatus = 'sent';
                     purchaseOrder.docuSignSentAt = now;
-                    purchaseOrder.docuSignEnvelopes = docuSignResults;
+                    purchaseOrder.docuSignEnvelopes = zohoSignResults;
                     purchaseOrder.investorAllocations = purchaseOrder.investorAllocations.map((allocation) => {
-                        const match = docuSignResults.find(result => String(result.investorId) === String(allocation.investorId));
+                        const match = zohoSignResults.find(result => String(result.investorId) === String(allocation.investorId));
                         if (match) {
                             allocation.docuSignEnvelopeId = match.envelopeId;
                             allocation.docuSignStatus = match.status;
@@ -3615,12 +3615,12 @@ exports.approveLead = async (req, res, next) => {
                     });
                     await purchaseOrder.save();
 
-                    logger.info(`DocuSign envelopes sent for lead ${lead.leadId}:`, docuSignResults.map(result => result.envelopeId));
+                    logger.info(`Zoho Sign requests sent for lead ${lead.leadId}:`, zohoSignResults.map(result => result.envelopeId));
                 } else {
-                    logger.warn(`No DocuSign envelopes were sent for lead ${lead.leadId}`);
+                    logger.warn(`No Zoho Sign requests were sent for lead ${lead.leadId}`);
                     purchaseOrder.docuSignStatus = 'failed';
-                    purchaseOrder.docuSignError = docuSignErrors.length > 0
-                        ? JSON.stringify(docuSignErrors)
+                    purchaseOrder.docuSignError = zohoSignErrors.length > 0
+                        ? JSON.stringify(zohoSignErrors)
                         : 'No investor envelopes were sent';
                     purchaseOrder.docuSignFailedAt = now;
                     await purchaseOrder.save();
@@ -3638,7 +3638,7 @@ exports.approveLead = async (req, res, next) => {
 
         res.status(200).json({
             success: true,
-            message: isDualMet ? 'Lead fully approved and DocuSign envelope sent to investor' : 'Approval recorded. One more group approval needed.',
+            message: isDualMet ? 'Lead fully approved and Zoho Sign request sent to investor' : 'Approval recorded. One more group approval needed.',
             data: lead
         });
     } catch (error) {
@@ -3692,7 +3692,7 @@ exports.getSignedDocument = async (req, res, next) => {
         }
 
         // Find the specific document
-        // Prefer matching by MongoDB subdocument _id (unique), then fall back to DocuSign documentId
+        // Prefer matching by MongoDB subdocument _id (unique), then fall back to stored Zoho Sign documentId
         let document = purchaseOrder.docuSignDocuments.id(documentId);
         if (!document) {
             document = purchaseOrder.docuSignDocuments.find(doc => doc.documentId === documentId);
@@ -3747,14 +3747,14 @@ exports.getSignedDocument = async (req, res, next) => {
 
             if (looksLikePdf(buffer)) return buffer;
 
-            // If content is missing or corrupt, try refetching from DocuSign now
+            // If content is missing or corrupt, try refetching from Zoho Sign now
             const sourceEnvelopeId = document.sourceEnvelopeId || purchaseOrder.docuSignEnvelopeId;
             if (!sourceEnvelopeId) {
                 return null;
             }
 
             try {
-                const signedDocs = await docusignService.getSignedDocuments(sourceEnvelopeId);
+                const signedDocs = await zohoSignService.getSignedDocuments(sourceEnvelopeId);
                 const refreshed = (signedDocs || []).find(d => String(d.documentId) === String(documentId));
                 if (refreshed && refreshed.content) {
                     // Update stored document content for future requests
@@ -3769,7 +3769,7 @@ exports.getSignedDocument = async (req, res, next) => {
                 }
             } catch (refetchErr) {
                 // Log and continue; will fall back to error response below
-                logger.error('Failed to refetch signed document from DocuSign:', refetchErr);
+                logger.error('Failed to refetch signed document from Zoho Sign:', refetchErr);
             }
 
             return null;
@@ -3779,7 +3779,7 @@ exports.getSignedDocument = async (req, res, next) => {
         if (!buffer) {
             return res.status(422).json({
                 success: false,
-                message: 'Signed PDF content is missing or corrupted. Please re-fetch from DocuSign.'
+                message: 'Signed PDF content is missing or corrupted. Please re-fetch from Zoho Sign.'
             });
         }
 

@@ -10,7 +10,7 @@ const logger = require('../utils/logger');
 const { logInvestor, logUserManagement } = require('../utils/auditLogger');
 const { sendMailtrapEmail } = require('../services/mailtrapService');
 const { generateInviteToken } = require('../utils/otpHelper');
-const docusignService = require('../services/docusignService');
+const zohoSignService = require('../services/zohoSignService');
 
 /**
  * @desc    Get investor Statement of Accounts (SOA)
@@ -434,14 +434,14 @@ exports.createInvestor = async (req, res, next) => {
             createdBy: req.userId
         });
 
-        // Send DocuSign Investor Agreement
-        if (!process.env.DOCUSIGN_PURCHASE_INVESTMENT_AGREEMENT_TEMPLATE_ID) {
-            throw new Error('DOCUSIGN_PURCHASE_INVESTMENT_AGREEMENT_TEMPLATE_ID not configured in environment variables.');
+        // Send Zoho Sign Investor Agreement
+        if (!process.env.ZOHOSIGN_INVESTOR_TEMPLATE_ID || !process.env.ZOHOSIGN_INVESTOR_ACTION_ID) {
+            throw new Error('Zoho Sign investor template/action IDs are not configured (ZOHOSIGN_INVESTOR_TEMPLATE_ID, ZOHOSIGN_INVESTOR_ACTION_ID).');
         }
 
-        let envelopeResult;
+        let agreementResult;
         try {
-            envelopeResult = await docusignService.createInvestorAgreement({
+            agreementResult = await zohoSignService.createInvestorAgreement({
                 adminName: admin.name,
                 adminDesignation: finalAdminDesignation,
                 adminEmail: admin.email,
@@ -453,19 +453,24 @@ exports.createInvestor = async (req, res, next) => {
                 investmentAmount: parsedCreditLimit,
                 date: new Date()
             });
-            logger.info(`DocuSign Investor Agreement sent for investor ${investor.email}: ${envelopeResult.envelopeId}`);
-        } catch (docuSignError) {
-            logger.error(`Failed to send DocuSign Investor Agreement to ${investor.email}:`, docuSignError);
-            throw new Error(`Failed to send Investor Agreement via DocuSign: ${docuSignError.message}`);
+            logger.info(`Zoho Sign Investor Agreement sent for investor ${investor.email}: ${agreementResult.requestId}`);
+        } catch (zohoError) {
+            logger.error(`Failed to send Zoho Sign Investor Agreement to ${investor.email}:`, zohoError);
+            throw new Error(`Failed to send Investor Agreement via Zoho Sign: ${zohoError.message}`);
+        }
+
+        if (!agreementResult?.requestId) {
+            throw new Error('Zoho Sign did not return a request ID for the investor agreement request.');
         }
 
         // Create InvestorAgreement record
+        const initialStatus = agreementResult?.status || 'sent';
         const investorAgreement = await InvestorAgreement.create({
             investorId: investor._id,
             adminId: admin._id,
-            envelopeId: envelopeResult.envelopeId,
-            status: 'sent',
-            docuSignStatus: envelopeResult.status || 'sent',
+            envelopeId: agreementResult.requestId,
+            status: initialStatus,
+            docuSignStatus: initialStatus,
             sentAt: new Date(),
             agreementData: {
                 adminName: admin.name,

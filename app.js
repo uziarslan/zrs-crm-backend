@@ -36,32 +36,6 @@ app.use(cors({
     credentials: true
 }));
 
-// Raw body middleware for DocuSign webhooks (must be before other body parsers)
-app.use('/api/webhooks/docusign', express.raw({ type: '*/*', limit: '10mb' }), (req, res, next) => {
-    // Store raw body for DocuSign webhook processing
-    if (req.body) {
-        req.rawBody = req.body.toString();
-        console.log('🔧 Raw body middleware - Content-Type:', req.headers['content-type']);
-        console.log('🔧 Raw body middleware - Raw body length:', req.rawBody.length);
-        console.log('🔧 Raw body middleware - Raw body preview:', req.rawBody.substring(0, 200));
-
-        // Try to parse as JSON
-        try {
-            req.body = JSON.parse(req.rawBody);
-            console.log('🔧 Parsed as JSON successfully');
-        } catch (jsonError) {
-            // If JSON parsing fails, keep as raw body
-            console.log('🔧 JSON parsing failed, keeping as raw body');
-            req.body = { rawBody: req.rawBody };
-        }
-    } else {
-        req.rawBody = '';
-        req.body = {};
-        console.log('🔧 No body data received');
-    }
-    next();
-});
-
 // Body parser middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));

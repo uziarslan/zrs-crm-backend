@@ -181,7 +181,7 @@ const leadSchema = new mongoose.Schema({
         ]
     },
 
-    // Reference to PurchaseOrder for DocuSign integration
+    // Reference to PurchaseOrder for signature integration
     purchaseOrder: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'PurchaseOrder',

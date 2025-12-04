@@ -1,6 +1,6 @@
 const quickbooksService = require('../services/quickbooksService');
 const teamsService = require('../services/teamsService');
-const docusignService = require('../services/docusignService');
+const zohoSignService = require('../services/zohoSignService');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Investor = require('../models/Investor');
 const logger = require('../utils/logger');
@@ -114,11 +114,11 @@ exports.msGraphCallback = async (req, res, next) => {
 };
 
 /**
- * @desc    Send DocuSign envelope for PO
- * @route   POST /api/integrations/docusign/send-po/:poId
+ * @desc    Send Zoho Sign request for PO
+ * @route   POST /api/integrations/sign/send-po/:poId
  * @access  Private (Admin/Manager)
  */
-exports.sendDocuSignPO = async (req, res, next) => {
+exports.sendZohoSignPO = async (req, res, next) => {
     try {
         const po = await PurchaseOrder.findById(req.params.poId)
             .populate('vehicleId')
@@ -131,11 +131,11 @@ exports.sendDocuSignPO = async (req, res, next) => {
             });
         }
 
-        // Check if dual approval is met before sending to DocuSign
+        // Check if dual approval is met before sending to Zoho Sign
         if (!po.isDualApprovalMet()) {
             return res.status(400).json({
                 success: false,
-                message: 'Purchase Order requires dual admin approval before sending to DocuSign'
+                message: 'Purchase Order requires dual admin approval before sending to Zoho Sign'
             });
         }
 
@@ -148,8 +148,8 @@ exports.sendDocuSignPO = async (req, res, next) => {
             percentage: allocation.percentage
         }));
 
-        // Create DocuSign envelopes (one per investor)
-        const envelopes = await docusignService.createPurchaseOrderEnvelope({
+        // Create Zoho Sign requests (one per investor)
+        const envelopes = await zohoSignService.createPurchaseOrderEnvelope({
             poId: po.poId,
             vehicleId: po.vehicleId?.vehicleId,
             investorAllocations,
@@ -184,90 +184,19 @@ exports.sendDocuSignPO = async (req, res, next) => {
 
         await po.save();
 
-        logger.info(`DocuSign envelopes sent for PO ${po.poId}:`, envelopes.map(env => env.envelopeId));
+        logger.info(`Zoho Sign requests sent for PO ${po.poId}:`, envelopes.map(env => env.envelopeId));
 
         res.status(200).json({
             success: true,
-            message: 'DocuSign envelopes sent to investors',
+            message: 'Zoho Sign requests sent to investors',
             data: envelopes
         });
     } catch (error) {
-        logger.error('Send DocuSign PO error:', error);
+        logger.error('Send Zoho Sign PO error:', error);
         next(error);
     }
 };
 
-/**
- * @desc    DocuSign OAuth callback handler
- * @route   GET /api/integrations/docusign/callback
- * @access  Public (OAuth callback)
- */
-exports.docusignCallback = async (req, res, next) => {
-    try {
-        const { code, error } = req.query;
-
-        if (error) {
-            return res.status(400).send(`
-                <html>
-                    <body style="font-family: Arial, sans-serif; padding: 20px; background-color: #f5f5f5;">
-                        <div style="max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
-                            <h2 style="color: #d32f2f;">❌ DocuSign Consent Failed</h2>
-                            <p>Error: ${error}</p>
-                            <p>Please try again or contact support.</p>
-                            <a href="/" style="display: inline-block; background: #1976d2; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; margin-top: 20px;">Return to Dashboard</a>
-                        </div>
-                    </body>
-                </html>
-            `);
-        }
-
-        if (code) {
-            return res.status(200).send(`
-                <html>
-                    <body style="font-family: Arial, sans-serif; padding: 20px; background-color: #f5f5f5;">
-                        <div style="max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
-                            <h2 style="color: #2e7d32;">✅ DocuSign Consent Granted Successfully!</h2>
-                            <p>Your DocuSign integration is now ready to use.</p>
-                            <p>You can now:</p>
-                            <ul>
-                                <li>Create leads and assign investors</li>
-                                <li>Submit for dual approval</li>
-                                <li>Automatically send DocuSign envelopes to investors</li>
-                                <li>Track signing status in real-time</li>
-                            </ul>
-                            <a href="/" style="display: inline-block; background: #1976d2; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; margin-top: 20px;">Return to Dashboard</a>
-                        </div>
-                    </body>
-                </html>
-            `);
-        }
-
-        res.status(400).send(`
-            <html>
-                <body style="font-family: Arial, sans-serif; padding: 20px; background-color: #f5f5f5;">
-                    <div style="max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
-                        <h2 style="color: #d32f2f;">❌ Invalid Callback</h2>
-                        <p>No authorization code received.</p>
-                        <a href="/" style="display: inline-block; background: #1976d2; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; margin-top: 20px;">Return to Dashboard</a>
-                    </div>
-                </body>
-            </html>
-        `);
-    } catch (error) {
-        logger.error('DocuSign callback error:', error);
-        res.status(500).send(`
-            <html>
-                <body style="font-family: Arial, sans-serif; padding: 20px; background-color: #f5f5f5;">
-                    <div style="max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
-                        <h2 style="color: #d32f2f;">❌ Server Error</h2>
-                        <p>An error occurred processing the DocuSign callback.</p>
-                        <a href="/" style="display: inline-block; background: #1976d2; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; margin-top: 20px;">Return to Dashboard</a>
-                    </div>
-                </body>
-            </html>
-        `);
-    }
-};
 
 /**
  * @desc    Create test drive calendar event

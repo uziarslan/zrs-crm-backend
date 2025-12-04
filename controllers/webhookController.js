@@ -6,25 +6,22 @@ const logger = require('../utils/logger');
 const { sendNotificationEmail } = require('../utils/emailService');
 const { sendMailtrapEmail } = require('../services/mailtrapService');
 const { generateInviteToken } = require('../utils/otpHelper');
-const docusignService = require('../services/docusignService');
+const zohoSignService = require('../services/zohoSignService');
 
-/**
- * @desc    DocuSign webhook handler
- * @route   POST /api/webhooks/docusign
- * @access  Public (webhook)
- */
-exports.docusignWebhook = async (req, res, next) => {
+const handleSignatureWebhook = async (req, res, next) => {
+    const providerLabel = req.__provider || 'Zoho Sign';
+    const signatureService = req.__signatureService || zohoSignService;
     try {
-        // Handle raw body parsing for DocuSign webhooks
+        // Handle webhook body parsing (Zoho Sign sends JSON)
         let event, data;
 
-        // Handle DocuSign Connect JSON webhook format
+        // Handle payload from Zoho Sign normalization helper
         if (req.rawBody) {
             try {
                 const rawData = JSON.parse(req.rawBody);
-                logger.info('📋 DocuSign Connect JSON webhook detected');
+                logger.info(`📋 ${providerLabel} webhook payload parsed from raw body`);
 
-                // Extract data from DocuSign Connect format
+                // Extract data from payload format
                 event = rawData.event || 'envelope-updated';
                 data = {
                     envelopeId: rawData.data?.envelopeId || rawData.data?.envelopeSummary?.envelopeId,
@@ -36,7 +33,7 @@ exports.docusignWebhook = async (req, res, next) => {
                     fullData: rawData
                 };
             } catch (parseError) {
-                logger.error('Failed to parse DocuSign Connect JSON:', parseError);
+                logger.error(`Failed to parse ${providerLabel} raw body JSON:`, parseError);
                 event = 'envelope-updated';
                 data = { rawBody: req.rawBody };
             }
@@ -44,11 +41,11 @@ exports.docusignWebhook = async (req, res, next) => {
             event = req.body.event;
             data = req.body.data;
         } else if (req.body.envelopeId) {
-            // DocuSign might send data directly in the body
+            // Zoho Sign might send data directly in the body
             event = req.body.event || 'envelope-updated';
             data = req.body;
         } else if (req.body.envelopeSummary) {
-            // DocuSign might send envelopeSummary directly
+            // Zoho Sign might send envelopeSummary directly
             event = req.body.event || 'envelope-updated';
             data = req.body;
         } else {
@@ -58,17 +55,11 @@ exports.docusignWebhook = async (req, res, next) => {
         }
 
         // Reduced logging to prevent memory issues
-        logger.info('📋 DocuSign webhook received:', {
+        logger.info(`📋 ${providerLabel} webhook received:`, {
             event: event,
             hasEnvelopeId: !!(data?.envelopeId || data?.envelopeSummary?.envelopeId),
             hasStatus: !!(data?.envelopeSummary?.status || data?.status)
         });
-
-        // Verify webhook authenticity (in production, verify HMAC signature)
-        // const hmacSignature = req.headers['x-docusign-signature-1'];
-        // if (!verifyDocuSignSignature(req.body, hmacSignature)) {
-        //   return res.status(401).json({ success: false, message: 'Invalid signature' });
-        // }
 
         // Extract envelope ID from multiple possible locations
         const envelopeId = data?.envelopeId ||
@@ -82,7 +73,7 @@ exports.docusignWebhook = async (req, res, next) => {
             data?.envelopeStatus ||
             req.body.status;
 
-        logger.info('📋 DocuSign webhook processing:', {
+        logger.info(`📋 ${providerLabel} webhook processing:`, {
             envelopeId,
             status: status || data?.envelopeSummary?.status || data?.status,
             event
@@ -93,9 +84,9 @@ exports.docusignWebhook = async (req, res, next) => {
             logger.warn('📋 Raw Body:', JSON.stringify(req.body, null, 2));
             logger.warn('📋 Data Object:', JSON.stringify(data, null, 2));
             logger.warn('📋 This might indicate:');
-            logger.warn('   - DocuSign webhook not configured properly');
+            logger.warn(`   - ${providerLabel} webhook not configured properly`);
             logger.warn('   - Webhook data format is different than expected');
-            logger.warn('   - DocuSign is not sending the expected data structure');
+            logger.warn(`   - ${providerLabel} is not sending the expected data structure`);
             return res.status(400).json({ success: false, message: 'Missing envelope ID' });
         }
 
@@ -129,7 +120,7 @@ exports.docusignWebhook = async (req, res, next) => {
         });
 
         if (po && lead) {
-            // Handle Lead Purchase Agreement signing - only update DocuSign status
+            // Handle Lead Purchase Agreement signing - only update Zoho Sign status
             const validStatuses = ['created', 'sent', 'delivered', 'signed', 'completed', 'declined', 'voided', 'failed'];
 
             // Try multiple ways to get the status
@@ -292,7 +283,7 @@ exports.docusignWebhook = async (req, res, next) => {
                 po.docuSignStatus = 'voided';
                 applyStatusToMatching('voided');
                 po.status = 'draft'; // Reset PO status to draft
-                po.docuSignError = 'Envelope deleted in DocuSign';
+                po.docuSignError = `Envelope deleted in ${providerLabel}`;
                 po.docuSignFailedAt = new Date();
                 // Clear stored documents since envelope was deleted
                 po.docuSignDocuments = [];
@@ -315,12 +306,12 @@ exports.docusignWebhook = async (req, res, next) => {
                 // Update with valid status
                 applyStatusToMatching(docuSignStatus);
                 po.docuSignStatus = validStatuses.includes(docuSignStatus) ? docuSignStatus : 'sent';
-                logger.info(`Lead ${lead.leadId} DocuSign status updated to: ${po.docuSignStatus}`);
+                logger.info(`Lead ${lead.leadId} ${providerLabel} status updated to: ${po.docuSignStatus}`);
 
-                // If we're getting 'failed' status repeatedly, try to check the actual DocuSign status
+                // If we're getting 'failed' status repeatedly, try to check the actual Zoho Sign status
                 if (docuSignStatus === 'failed' && po.docuSignStatus === 'failed') {
                     logger.warn(`Lead ${lead.leadId} getting 'failed' status - this might indicate a webhook data issue`);
-                    logger.warn('Consider checking DocuSign API directly for actual envelope status');
+                    logger.warn(`Consider checking ${providerLabel} API directly for actual envelope status`);
                 }
             }
 
@@ -332,7 +323,14 @@ exports.docusignWebhook = async (req, res, next) => {
 
             // Queue document fetching asynchronously if completed
             if (docuSignStatus === 'completed' || hasCompletedRecipient || isCompletionEvent) {
-                fetchPODocumentsAsync(envelopeId, po._id, lead._id, matchingEnvelope?.investorId || (matchingAllocation?.investorId?._id || matchingAllocation?.investorId)).catch(err => {
+                fetchPODocumentsAsync(
+                    signatureService,
+                    providerLabel,
+                    envelopeId,
+                    po._id,
+                    lead._id,
+                    matchingEnvelope?.investorId || (matchingAllocation?.investorId?._id || matchingAllocation?.investorId)
+                ).catch(err => {
                     logger.error(`Error fetching PO documents asynchronously for ${envelopeId}:`, err);
                 });
             }
@@ -350,27 +348,27 @@ exports.docusignWebhook = async (req, res, next) => {
             }
 
             if (eventLower === 'envelope-deleted' || eventLower === 'envelope-voided' || statusLower === 'voided') {
-                // Envelope deleted/voided in DocuSign
+                // Envelope deleted/voided in e-sign provider
                 po.docuSignStatus = 'voided';
                 po.status = 'draft';
-                po.docuSignError = 'Envelope deleted/voided in DocuSign';
+                po.docuSignError = `Envelope deleted/voided in ${providerLabel}`;
                 po.docuSignFailedAt = new Date();
                 po.docuSignSignedAt = null;
                 po.docuSignDocuments = [];
-                logger.info(`PO ${po.poId} reset to draft after DocuSign deletion/void.`);
+                logger.info(`PO ${po.poId} reset to draft after ${providerLabel} deletion/void.`);
             } else if (statusLower === 'completed') {
                 po.status = 'signed';
                 po.invoiceGenerated = false; // Ready for invoice generation
-                logger.info(`PO ${po.poId} marked as signed after DocuSign completion`);
+                logger.info(`PO ${po.poId} marked as signed after ${providerLabel} completion`);
             } else if (statusLower === 'declined') {
                 po.status = 'rejected';
-                logger.info(`PO ${po.poId} marked as rejected after DocuSign ${statusLower}`);
+                logger.info(`PO ${po.poId} marked as rejected after ${providerLabel} ${statusLower}`);
             }
 
             await po.save();
         } else if (!po) {
             // No Purchase Order found for this envelope
-            logger.warn(`No PO found for DocuSign envelope ${envelopeId}`);
+            logger.warn(`No PO found for ${providerLabel} envelope ${envelopeId}`);
         }
 
         // Handle Investor Agreement if found
@@ -441,6 +439,8 @@ exports.docusignWebhook = async (req, res, next) => {
 
                 // Queue document fetching and email sending asynchronously
                 processInvestorAgreementAsync(
+                    signatureService,
+                    providerLabel,
                     envelopeId,
                     investorAgreement._id,
                     event,
@@ -448,7 +448,8 @@ exports.docusignWebhook = async (req, res, next) => {
                     recipientStatus,
                     docuSignStatus,
                     recipientStatuses,
-                    investorAgreement
+                    investorAgreement,
+                    data?.rawZohoPayload?.requests?.document_ids
                 ).catch(err => {
                     logger.error(`Error processing investor agreement asynchronously for ${envelopeId}:`, err);
                 });
@@ -504,8 +505,8 @@ exports.docusignWebhook = async (req, res, next) => {
         // Acknowledge webhook immediately (within 1-2 seconds)
         res.status(200).json({ success: true, message: 'Webhook received' });
     } catch (error) {
-        logger.error('DocuSign webhook error:', error);
-        // Return 200 to prevent DocuSign from retrying
+        logger.error(`${providerLabel} webhook error:`, error);
+        // Return 200 to prevent Zoho Sign from retrying immediately
         if (!res.headersSent) {
             res.status(200).json({ success: false, message: 'Error processing webhook' });
         }
@@ -513,12 +514,84 @@ exports.docusignWebhook = async (req, res, next) => {
 };
 
 /**
+ * @desc    Zoho Sign webhook handler
+ * @route   POST /api/webhooks/zohosign
+ * @access  Public (webhook)
+ */
+exports.zohoSignWebhook = async (req, res, next) => {
+    try {
+        const incomingPayload = req.body || {};
+        const payloadPreview = typeof incomingPayload === 'string'
+            ? incomingPayload
+            : JSON.stringify(incomingPayload, null, 2);
+        logger.info(`📦 Zoho Sign raw webhook payload: ${payloadPreview}`);
+        const normalizedPayload = buildZohoWebhookPayload(incomingPayload);
+        req.body = normalizedPayload;
+        req.rawBody = JSON.stringify(normalizedPayload);
+        req.__provider = 'Zoho Sign';
+        req.__signatureService = zohoSignService;
+        await handleSignatureWebhook(req, res, next);
+    } catch (error) {
+        logger.error('Zoho Sign webhook error:', error);
+        if (!res.headersSent) {
+            res.status(200).json({ success: false, message: error.message || 'Error processing webhook' });
+        }
+    }
+};
+
+/**
  * Fetch and store PO documents asynchronously (runs after webhook response)
  */
-async function fetchPODocumentsAsync(envelopeId, poId, leadId, investorId) {
+function buildZohoWebhookPayload(body = {}) {
+    const requestNode = body.requests || body.request || {};
+    const actionsNode = Array.isArray(body.actions)
+        ? body.actions
+        : (Array.isArray(requestNode.actions) ? requestNode.actions : []);
+
+    const requestId = requestNode.request_id || body.request_id || body.document_id;
+    if (!requestId) {
+        throw new Error('Zoho Sign webhook payload is missing request_id');
+    }
+
+    const eventType = String(body.event_type || body.event || requestNode.event_type || 'request-updated');
+    const normalizedEvent = eventType.toLowerCase().replace(/\s+/g, '-');
+
+    const statusRaw = requestNode.request_status || body.request_status || actionsNode[0]?.action_status;
+    const normalizedStatus = zohoSignService.normalizeStatus(statusRaw || 'sent');
+
+    const signers = actionsNode
+        .filter(action => action && (action.recipient_email || action.recipient_name))
+        .map(action => ({
+            name: action.recipient_name || '',
+            email: action.recipient_email || '',
+            status: zohoSignService.normalizeStatus(action.action_status || action.status || normalizedStatus),
+            recipientId: action.action_id,
+            routingOrder: action.signing_order
+        }));
+
+    return {
+        event: normalizedEvent,
+        data: {
+            envelopeId: requestId,
+            status: normalizedStatus,
+            envelopeSummary: {
+                envelopeId: requestId,
+                status: normalizedStatus,
+                recipients: {
+                    signers
+                }
+            },
+            provider: 'Zoho Sign',
+            rawZohoPayload: body
+        }
+    };
+}
+
+async function fetchPODocumentsAsync(signatureService, providerLabel, envelopeId, poId, leadId, investorId) {
     try {
-        logger.info(`📥 Fetching signed documents for PO envelope ${envelopeId}`);
-        const signedDocuments = await docusignService.getSignedDocuments(envelopeId);
+        logger.info(`📥 Fetching signed documents for PO envelope ${envelopeId} via ${providerLabel}`);
+        const service = signatureService || zohoSignService;
+        const signedDocuments = await service.getSignedDocuments(envelopeId);
 
         if (signedDocuments && signedDocuments.length > 0) {
             const validDocuments = [];
@@ -568,7 +641,7 @@ async function fetchPODocumentsAsync(envelopeId, poId, leadId, investorId) {
             }
         }
     } catch (error) {
-        logger.error(`Error fetching PO documents for envelope ${envelopeId}:`, error);
+        logger.error(`Error fetching PO documents for envelope ${envelopeId} via ${providerLabel}:`, error);
     }
 }
 
@@ -577,6 +650,8 @@ async function fetchPODocumentsAsync(envelopeId, poId, leadId, investorId) {
  * Runs after webhook response to prevent memory issues and timeouts
  */
 async function processInvestorAgreementAsync(
+    signatureService,
+    providerLabel,
     envelopeId,
     agreementId,
     event,
@@ -584,12 +659,17 @@ async function processInvestorAgreementAsync(
     recipientStatus,
     docuSignStatus,
     recipientStatuses,
-    investorAgreement
+    investorAgreement,
+    fallbackDocumentMetadata = []
 ) {
     try {
         // Fetch and store signed documents
-        logger.info(`📥 Fetching signed documents for Investor Agreement envelope ${envelopeId}`);
-        const signedDocuments = await docusignService.getSignedDocuments(envelopeId);
+        logger.info(`📥 Fetching signed documents for Investor Agreement envelope ${envelopeId} via ${providerLabel}`);
+        const service = signatureService || zohoSignService;
+        const signedDocuments = await service.getSignedDocuments(
+            envelopeId,
+            fallbackDocumentMetadata
+        );
 
         if (signedDocuments && signedDocuments.length > 0) {
             const validDocuments = [];
@@ -707,7 +787,7 @@ async function processInvestorAgreementAsync(
             }
         }
     } catch (error) {
-        logger.error(`Error processing investor agreement for envelope ${envelopeId}:`, error);
+        logger.error(`Error processing investor agreement for envelope ${envelopeId} via ${providerLabel}:`, error);
     }
 }
 

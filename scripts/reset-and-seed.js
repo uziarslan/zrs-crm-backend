@@ -143,7 +143,7 @@ async function resetAndSeed() {
             createdByModel: 'Admin'
         });
 
-        // ===== CREATE PURCHASE ORDER WITH COMPLETED DOCUSIGN =====
+        // ===== CREATE PURCHASE ORDER WITH COMPLETED ZOHO SIGN =====
         const purchaseOrder = await PurchaseOrder.create({
             poId: 'PO0001',
             investorId: investor._id,
@@ -168,7 +168,7 @@ async function resetAndSeed() {
         await lead.save();
 
         logger.info(`✓ Test lead created: ${lead.leadId}`);
-        logger.info(`✓ Purchase order created: ${purchaseOrder.poId} (DocuSign: completed)`);
+        logger.info(`✓ Purchase order created: ${purchaseOrder.poId} (Zoho Sign: completed)`);
 
         logger.info('\n✅ Database reset and test data created successfully!');
         logger.info('\n📝 Login Credentials:');
@@ -182,7 +182,7 @@ async function resetAndSeed() {
         logger.info(`   Status: ${lead.status}`);
         logger.info(`   Investor: ${investor.name} (${investor.email})`);
         logger.info(`   All documents: ✓ Present`);
-        logger.info(`   Purchase Order: ✓ Completed (DocuSign signed)`);
+        logger.info(`   Purchase Order: ✓ Completed (Zoho Sign signed)`);
         logger.info('\n🎯 Ready to test:');
         logger.info('   1. Log in as admin@zrscarstrading.com');
         logger.info('   2. Go to Inspection tab');
