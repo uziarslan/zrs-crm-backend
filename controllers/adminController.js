@@ -579,3 +579,142 @@ exports.updateAdminGroups = async (req, res, next) => {
     }
 };
 
+/**
+ * @desc    Get current admin profile
+ * @route   GET /api/v1/admin/profile
+ * @access  Private (Admin only)
+ */
+exports.getProfile = async (req, res, next) => {
+    try {
+        const admin = await Admin.findById(req.userId).select('-passwordHash');
+        
+        if (!admin) {
+            return res.status(404).json({
+                success: false,
+                message: 'Admin not found'
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            data: admin
+        });
+    } catch (error) {
+        logger.error('Get profile error:', error);
+        next(error);
+    }
+};
+
+/**
+ * @desc    Update admin profile
+ * @route   PUT /api/v1/admin/profile
+ * @access  Private (Admin only)
+ */
+exports.updateProfile = async (req, res, next) => {
+    try {
+        const { name, email, designation } = req.body;
+
+        const admin = await Admin.findById(req.userId);
+        
+        if (!admin) {
+            return res.status(404).json({
+                success: false,
+                message: 'Admin not found'
+            });
+        }
+
+        // Check if email is being changed and if it's already taken
+        if (email && email !== admin.email) {
+            const existingAdmin = await Admin.findOne({ email });
+            if (existingAdmin) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Email is already in use'
+                });
+            }
+        }
+
+        // Update fields
+        if (name) admin.name = name;
+        if (email) admin.email = email;
+        if (designation !== undefined) admin.designation = designation;
+
+        await admin.save();
+
+        // Audit log
+        await logUserManagement(req, 'profile_updated', `Updated profile information`, admin, {
+            updatedFields: { name, email, designation }
+        });
+
+        // Return updated admin without password
+        const updatedAdmin = admin.toJSON();
+
+        res.status(200).json({
+            success: true,
+            message: 'Profile updated successfully',
+            data: updatedAdmin
+        });
+    } catch (error) {
+        logger.error('Update profile error:', error);
+        next(error);
+    }
+};
+
+/**
+ * @desc    Change admin password
+ * @route   PUT /api/v1/admin/change-password
+ * @access  Private (Admin only)
+ */
+exports.changePassword = async (req, res, next) => {
+    try {
+        const { currentPassword, newPassword } = req.body;
+
+        if (!currentPassword || !newPassword) {
+            return res.status(400).json({
+                success: false,
+                message: 'Current password and new password are required'
+            });
+        }
+
+        if (newPassword.length < 8) {
+            return res.status(400).json({
+                success: false,
+                message: 'New password must be at least 8 characters long'
+            });
+        }
+
+        const admin = await Admin.findById(req.userId);
+        
+        if (!admin) {
+            return res.status(404).json({
+                success: false,
+                message: 'Admin not found'
+            });
+        }
+
+        // Verify current password
+        const isPasswordValid = await admin.comparePassword(currentPassword);
+        if (!isPasswordValid) {
+            return res.status(400).json({
+                success: false,
+                message: 'Current password is incorrect'
+            });
+        }
+
+        // Update password (will be hashed by pre-save hook)
+        admin.passwordHash = newPassword;
+        await admin.save();
+
+        // Audit log
+        await logUserManagement(req, 'password_changed', `Changed password`, admin, {});
+
+        res.status(200).json({
+            success: true,
+            message: 'Password changed successfully'
+        });
+    } catch (error) {
+        logger.error('Change password error:', error);
+        next(error);
+    }
+};
+

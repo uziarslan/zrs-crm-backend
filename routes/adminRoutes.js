@@ -51,5 +51,23 @@ router.put('/groups',
     adminController.updateAdminGroups
 );
 
+// Profile management
+router.get('/profile', adminController.getProfile);
+router.put(
+    '/profile',
+    body('name').optional().notEmpty().withMessage('Name cannot be empty'),
+    body('email').optional().isEmail().withMessage('Valid email is required'),
+    body('designation').optional().trim(),
+    validate,
+    adminController.updateProfile
+);
+router.put(
+    '/change-password',
+    body('currentPassword').notEmpty().withMessage('Current password is required'),
+    body('newPassword').isLength({ min: 8 }).withMessage('New password must be at least 8 characters'),
+    validate,
+    adminController.changePassword
+);
+
 module.exports = router;
 
