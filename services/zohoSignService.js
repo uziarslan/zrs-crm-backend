@@ -239,16 +239,26 @@ class ZohoSignService {
             throw new Error('ZOHOSIGN_PURCHASE_AGREEMENT_ACTION_ID is not configured');
         }
 
-        const { leadId, investor } = leadData;
+        const { leadId, investor, vehicleInfo } = leadData;
         if (!investor || !investor.email) {
             throw new Error('Investor email is required to send Zoho Sign purchase agreement');
         }
 
         const fieldTextData = this.buildLeadAgreementFieldData(leadData);
 
+        // Build car name from make and model
+        const carName = vehicleInfo?.make && vehicleInfo?.model
+            ? `${vehicleInfo.make} ${vehicleInfo.model}`.trim()
+            : '';
+
+        // Build request name with car name if available
+        const requestName = carName
+            ? `Purchase Agreement ${leadId} - ${carName} - ZRS Cars Trading`
+            : `Purchase Agreement ${leadId} - ZRS Cars Trading`;
+
         const payload = {
             templates: {
-                request_name: `Purchase Agreement ${leadId} - ZRS Cars Trading`,
+                request_name: requestName,
                 field_data: {
                     field_text_data: fieldTextData,
                     field_boolean_data: {},
