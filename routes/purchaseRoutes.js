@@ -282,7 +282,7 @@ router.put(
     isAdmin,
     mongoIdValidation,
     body('transferCost').notEmpty().isFloat({ min: 0 }).withMessage('transferCost is required'),
-    body('detailing_cost').notEmpty().isFloat({ min: 0 }).withMessage('detailing_cost is required'),
+    body('detailing_cost').optional({ values: 'falsy' }).isFloat({ min: 0 }),
     body('agent_commision').optional({ values: 'falsy' }).isFloat({ min: 0 }),
     body('car_recovery_cost').optional({ values: 'falsy' }).isFloat({ min: 0 }),
     body('inspection_cost').optional({ values: 'falsy' }).isFloat({ min: 0 }),

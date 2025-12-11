@@ -34,19 +34,80 @@ exports.getDashboard = async (req, res, next) => {
         // Inventory breakdown - count leads with inventory status
         const inventoryByStatus = [{ _id: 'inventory', count: await Lead.countDocuments({ status: 'inventory' }) }];
 
-        // Sales metrics
+        // Sales metrics - recalculate based on current lead data to ensure accuracy
         let totalRevenue = 0;
         let totalProfit = 0;
+        let totalZrsProfit = 0;
 
         if (sellInvoiceCount > 0) {
-            const invoices = await SellInvoice.find({});
-            totalRevenue = invoices.reduce((sum, inv) => sum + (inv.sellingPrice || 0), 0);
-            totalProfit = invoices.reduce((sum, inv) => sum + (inv.totalProfit || 0), 0);
+            const invoices = await SellInvoice.find({}).populate('lead');
+
+            for (const invoice of invoices) {
+                const lead = invoice.lead;
+                if (!lead) continue;
+
+                const sellingPrice = invoice.sellingPrice || 0;
+                totalRevenue += sellingPrice;
+
+                // Calculate buying price from current lead data (including additionalAmount)
+                const purchasePrice = lead.priceAnalysis?.purchasedFinalPrice || 0;
+                const jobCosting = lead.jobCosting || {};
+                const totalJobCost =
+                    (jobCosting.transferCost || 0) +
+                    (jobCosting.detailing_cost || 0) +
+                    (jobCosting.agent_commision || 0) +
+                    (jobCosting.car_recovery_cost || 0) +
+                    (jobCosting.inspection_cost || 0) +
+                    (jobCosting.additionalAmount || 0);
+                const buyingPrice = purchasePrice + totalJobCost;
+
+                // Calculate actual total profit
+                const calculatedTotalProfit = sellingPrice - buyingPrice;
+                totalProfit += calculatedTotalProfit;
+
+                // Recalculate ZRS profit based on correct total profit
+                let zrsProfit = 0;
+                if (lead.type === 'consignment') {
+                    // For consignment: ZRS gets all profit
+                    zrsProfit = calculatedTotalProfit;
+                } else {
+                    // For purchase: recalculate based on profit percentages
+                    let totalInvestorProfit = 0;
+
+                    if (lead.investorAllocations && lead.investorAllocations.length > 0) {
+                        // Recalculate investor profits based on their profit percentages
+                        for (const allocation of lead.investorAllocations) {
+                            const profitPercentage = allocation.profitPercentage || 0;
+                            const investorProfit = Math.round((calculatedTotalProfit * profitPercentage / 100) * 100) / 100;
+                            totalInvestorProfit += investorProfit;
+                        }
+                    } else {
+                        // Fallback: use stored invoice breakdown to get profit percentages
+                        const investorBreakdown = invoice.investorBreakdown || [];
+                        const storedTotalProfit = Number(invoice.totalProfit || 0);
+
+                        if (storedTotalProfit > 0 && investorBreakdown.length > 0) {
+                            for (const breakdown of investorBreakdown) {
+                                const storedProfit = Number(breakdown.profitAmount || 0);
+                                const profitPercentage = storedTotalProfit > 0 ? (storedProfit / storedTotalProfit) * 100 : 0;
+                                const investorProfit = Math.round((calculatedTotalProfit * profitPercentage / 100) * 100) / 100;
+                                totalInvestorProfit += investorProfit;
+                            }
+                        }
+                    }
+
+                    // ZRS profit is the remainder
+                    zrsProfit = Math.round((calculatedTotalProfit - totalInvestorProfit) * 100) / 100;
+                }
+
+                totalZrsProfit += zrsProfit;
+            }
         } else {
             // Legacy fallback: use Sale model
             const salesData = await Sale.find({ status: { $in: ['approved', 'completed'] } });
             totalRevenue = salesData.reduce((sum, sale) => sum + (sale.sellingPrice || 0), 0);
             totalProfit = salesData.reduce((sum, sale) => sum + (sale.profit || 0), 0);
+            // For legacy sales, ZRS profit would need to be calculated similarly if needed
         }
 
         // Pending approvals
@@ -144,7 +205,8 @@ exports.getDashboard = async (req, res, next) => {
                 sales: {
                     totalSales,
                     totalRevenue,
-                    totalProfit
+                    totalProfit,
+                    totalZrsProfit
                 },
                 approvals: {
                     pendingPOApprovals,
@@ -587,7 +649,7 @@ exports.updateAdminGroups = async (req, res, next) => {
 exports.getProfile = async (req, res, next) => {
     try {
         const admin = await Admin.findById(req.userId).select('-passwordHash');
-        
+
         if (!admin) {
             return res.status(404).json({
                 success: false,
@@ -615,7 +677,7 @@ exports.updateProfile = async (req, res, next) => {
         const { name, email, designation } = req.body;
 
         const admin = await Admin.findById(req.userId);
-        
+
         if (!admin) {
             return res.status(404).json({
                 success: false,
@@ -684,7 +746,7 @@ exports.changePassword = async (req, res, next) => {
         }
 
         const admin = await Admin.findById(req.userId);
-        
+
         if (!admin) {
             return res.status(404).json({
                 success: false,

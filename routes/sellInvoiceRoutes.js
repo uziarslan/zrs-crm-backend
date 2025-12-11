@@ -13,6 +13,7 @@ router.post(
     param('leadId').isMongoId().withMessage('Invalid lead ID'),
     body('balancePaymentReceived').optional().isFloat({ min: 0 }).withMessage('Balance payment received must be a positive number'),
     body('paymentMode').optional().isIn(['Cash', 'Bank Transfer', 'Cheque', 'Finance']).withMessage('Invalid payment mode'),
+    body('additionalAmount').optional().isFloat({ min: 0 }).withMessage('Additional amount must be a positive number'),
     validate,
     createSellInvoice
 );

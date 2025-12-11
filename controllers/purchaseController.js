@@ -415,10 +415,96 @@ exports.getLeads = async (req, res, next) => {
             })
             .sort({ createdAt: -1 });
 
+        // For sold leads, calculate buyingPrice and ensure profit calculations are correct
+        const leadsWithCalculations = leads.map(lead => {
+            if (status === 'sold' && lead.sellInvoice) {
+                const sellInvoice = lead.sellInvoice;
+
+                // Always calculate buyingPrice from current lead data to ensure additionalAmount is included
+                const purchasePrice = lead.priceAnalysis?.purchasedFinalPrice || 0;
+                const jobCosting = lead.jobCosting || {};
+                const totalJobCost =
+                    (jobCosting.transferCost || 0) +
+                    (jobCosting.detailing_cost || 0) +
+                    (jobCosting.agent_commision || 0) +
+                    (jobCosting.car_recovery_cost || 0) +
+                    (jobCosting.inspection_cost || 0) +
+                    (jobCosting.additionalAmount || 0);
+                const buyingPrice = purchasePrice + totalJobCost;
+
+                // Get selling price
+                const sellingPrice = lead.soldPrice || sellInvoice.sellingPrice || 0;
+
+                // Calculate actual total profit based on current buying price
+                const calculatedTotalProfit = sellingPrice - buyingPrice;
+
+                // Recalculate profits based on the correct total profit
+                // Use the profit percentages from the original invoice to distribute the new total profit
+                let zrsProfit = 0;
+                let otherPartyProfit = 0;
+
+                if (lead.type === 'consignment') {
+                    // For consignment: owner gets totalCost, ZRS gets profit
+                    otherPartyProfit = buyingPrice; // Owner gets the buying price
+                    zrsProfit = calculatedTotalProfit; // ZRS gets the profit
+                } else {
+                    // For purchase: recalculate profits based on profit percentages from investor allocations
+                    let totalInvestorProfit = 0;
+
+                    if (lead.investorAllocations && lead.investorAllocations.length > 0) {
+                        // Recalculate investor profits based on their profit percentages
+                        for (const allocation of lead.investorAllocations) {
+                            const profitPercentage = allocation.profitPercentage || 0;
+                            const investorProfit = Math.round((calculatedTotalProfit * profitPercentage / 100) * 100) / 100;
+                            totalInvestorProfit += investorProfit;
+                        }
+                    } else {
+                        // If no allocations, try to use stored invoice breakdown to get profit percentages
+                        const investorBreakdown = sellInvoice.investorBreakdown || [];
+                        const storedTotalProfit = Number(sellInvoice.totalProfit || 0);
+
+                        if (storedTotalProfit > 0 && investorBreakdown.length > 0) {
+                            // Calculate profit percentages from stored breakdown
+                            for (const breakdown of investorBreakdown) {
+                                const storedProfit = Number(breakdown.profitAmount || 0);
+                                const profitPercentage = storedTotalProfit > 0 ? (storedProfit / storedTotalProfit) * 100 : 0;
+                                const investorProfit = Math.round((calculatedTotalProfit * profitPercentage / 100) * 100) / 100;
+                                totalInvestorProfit += investorProfit;
+                            }
+                        } else {
+                            // Fallback: use stored values
+                            totalInvestorProfit = investorBreakdown.reduce((sum, inv) => {
+                                return sum + Number(inv.profitAmount || 0);
+                            }, 0);
+                        }
+                    }
+
+                    // ZRS profit is the remainder
+                    otherPartyProfit = Math.round(totalInvestorProfit * 100) / 100;
+                    zrsProfit = Math.round((calculatedTotalProfit - totalInvestorProfit) * 100) / 100;
+
+                    // Adjust for rounding - ensure they add up to total profit
+                    const sum = zrsProfit + otherPartyProfit;
+                    const difference = calculatedTotalProfit - sum;
+                    zrsProfit = Math.round((zrsProfit + difference) * 100) / 100;
+                }
+
+                // Add calculated values to lead object
+                const leadObj = lead.toObject();
+                leadObj.calculatedBuyingPrice = buyingPrice;
+                leadObj.calculatedTotalProfit = calculatedTotalProfit;
+                leadObj.calculatedZrsProfit = zrsProfit;
+                leadObj.calculatedOtherPartyProfit = otherPartyProfit;
+
+                return leadObj;
+            }
+            return lead;
+        });
+
         res.status(200).json({
             success: true,
-            count: leads.length,
-            data: leads
+            count: leadsWithCalculations.length,
+            data: leadsWithCalculations
         });
     } catch (error) {
         logger.error('Get leads error:', error);
@@ -3359,8 +3445,8 @@ exports.submitLeadForApproval = async (req, res, next) => {
 
         // Validate job costing complete
         const jc = lead.jobCosting || {};
-        if (!jc.transferCost || !jc.detailing_cost) {
-            return res.status(400).json({ success: false, message: 'Job costing incomplete. Transfer Cost and Detailing Cost are required.' });
+        if (!jc.transferCost) {
+            return res.status(400).json({ success: false, message: 'Job costing incomplete. Transfer Cost is required.' });
         }
 
         // Validate investor assigned

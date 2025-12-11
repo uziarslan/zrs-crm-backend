@@ -137,7 +137,8 @@ const leadSchema = new mongoose.Schema({
         detailing_cost: { type: Number, default: 0 },
         agent_commision: { type: Number, default: 0 },
         car_recovery_cost: { type: Number, default: 0 },
-        inspection_cost: { type: Number, default: 0 }
+        inspection_cost: { type: Number, default: 0 },
+        additionalAmount: { type: Number, default: 0 }
     },
     investorAllocations: [{
         investorId: {

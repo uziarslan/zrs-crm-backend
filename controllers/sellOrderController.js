@@ -103,7 +103,12 @@ exports.createSellOrder = async (req, res, next) => {
             });
         }
 
-        const totalPayable = parsedSellingPrice + parsedTransferCost + parsedInsurance + parsedBankFinanceFee + parsedInspectionCost;
+        // If transferCost is excluded, add it to total; if included, it's already in sellingPrice
+        const transferCostToAdd = transferCostInclusion === 'excluded' ? parsedTransferCost : 0;
+        // If insurance is excluded, add it to total; if included, it's already in sellingPrice
+        const insuranceToAdd = insuranceInclusion === 'excluded' ? parsedInsurance : 0;
+
+        const totalPayable = parsedSellingPrice + transferCostToAdd + insuranceToAdd + parsedBankFinanceFee + parsedInspectionCost;
         const balanceAmount = Math.max(totalPayable - parsedBookingAmount, 0);
 
         const vehicleInfo = lead.vehicleInfo || {};

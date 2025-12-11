@@ -42,7 +42,8 @@ exports.createSellInvoice = async (req, res, next) => {
         const { leadId } = req.params;
         const {
             balancePaymentReceived,
-            paymentMode
+            paymentMode,
+            additionalAmount
         } = req.body;
 
         const lead = await Lead.findById(leadId)
@@ -107,7 +108,18 @@ exports.createSellInvoice = async (req, res, next) => {
         const bookingAmount = sellOrder.bookingAmount || 0;
         const totalAmountReceived = bookingAmount + parsedBalancePayment;
 
-        // Calculate total cost (purchase price + all job costing)
+        // Save additional amount to job costing if provided
+        let parsedAdditionalAmount = 0;
+        if (additionalAmount !== undefined && additionalAmount !== null) {
+            parsedAdditionalAmount = parseFloat(additionalAmount) || 0;
+            if (!lead.jobCosting) {
+                lead.jobCosting = {};
+            }
+            lead.jobCosting.additionalAmount = parsedAdditionalAmount;
+            await lead.save();
+        }
+
+        // Calculate total cost (purchase price + all job costing including additional amount)
         const purchasedFinalPrice = lead.priceAnalysis?.purchasedFinalPrice || 0;
         const jobCosting = lead.jobCosting || {};
         const totalCost = purchasedFinalPrice +
@@ -115,7 +127,8 @@ exports.createSellInvoice = async (req, res, next) => {
             (jobCosting.detailing_cost || 0) +
             (jobCosting.agent_commision || 0) +
             (jobCosting.car_recovery_cost || 0) +
-            (jobCosting.inspection_cost || 0);
+            (jobCosting.inspection_cost || 0) +
+            (parsedAdditionalAmount || jobCosting.additionalAmount || 0);
 
         // Calculate total profit
         const sellingPrice = sellOrder.sellingPrice;
@@ -138,11 +151,12 @@ exports.createSellInvoice = async (req, res, next) => {
             logger.info(`Calculating profits for purchase lead ${lead.leadId}. Total Profit: ${totalProfit}, Investor Allocations: ${lead.investorAllocations?.length || 0}`);
 
             if (lead.investorAllocations && lead.investorAllocations.length > 0) {
+                // First pass: Calculate and round each investor's profit
                 for (const allocation of lead.investorAllocations) {
                     const investorId = allocation.investorId?._id || allocation.investorId;
                     const ownershipPercentage = allocation.ownershipPercentage || allocation.percentage || 0;
                     const investmentAmount = allocation.amount || 0;
-                    const profitPercentage = allocation.profitPercentage || 0; // Use profitPercentage from allocation
+                    const profitPercentage = allocation.profitPercentage || 0;
 
                     // Calculate investor's share of profit based on profit percentage (NOT ownership percentage)
                     const profitAmount = roundToCurrency((totalProfit * profitPercentage) / 100);
@@ -169,6 +183,7 @@ exports.createSellInvoice = async (req, res, next) => {
             }
 
             // Calculate ZRS profit (showroom profit) = Total Profit - Investor Profit
+            // This ensures the sum of all profits equals totalProfit exactly (accounting for rounding)
             zrsProfit = roundToCurrency(totalProfit - totalInvestorProfit);
 
             logger.info(`Profit Summary - Total: ${totalProfit}, Investor Total: ${totalInvestorProfit}, ZRS: ${zrsProfit}`);
