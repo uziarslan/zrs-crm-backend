@@ -136,14 +136,20 @@ class ZohoSignService {
         const agreementDate = date ? new Date(date).toLocaleDateString() : new Date().toLocaleDateString();
         const decidedPercentage = this.formatPercentageRange(decidedPercentageMin, decidedPercentageMax);
 
+        // Helper function to wrap values in quotes
+        const wrapInQuotes = (value) => {
+            if (value === null || value === undefined) return '""';
+            return `"${String(value)}"`;
+        };
+
         return {
-            date: agreementDate,
-            investment_amount: this.formatCurrency(investmentAmount),
-            decided_percentage: decidedPercentage,
-            admin_name: adminName || '',
-            investor_name: investorName || '',
-            investor_eid: investorEid || '',
-            designation: adminDesignation || ''
+            date: wrapInQuotes(agreementDate),
+            investment_amount: wrapInQuotes(this.formatCurrency(investmentAmount)),
+            decided_percentage: wrapInQuotes(decidedPercentage),
+            admin_name: wrapInQuotes(adminName || ''),
+            investor_name: wrapInQuotes(investorName || ''),
+            investor_eid: wrapInQuotes(investorEid || ''),
+            designation: wrapInQuotes(adminDesignation || '')
         };
     }
 
