@@ -1335,7 +1335,8 @@ function normalizeLeadAllocations(lead, options = {}) {
             percentage: ownershipPercentage, // Keep for backward compatibility
             ownershipPercentage,
             amount,
-            profitPercentage: allocation?.profitPercentage || undefined
+            profitPercentage: allocation?.profitPercentage || undefined,
+            vehicleUnderInvestorName: allocation?.vehicleUnderInvestorName || false
         };
     }).filter(Boolean);
 }
@@ -3351,15 +3352,28 @@ exports.assignInvestorToLead = async (req, res, next) => {
                 }
             }
 
+            // Vehicle under investor name (boolean)
+            const vehicleUnderInvestorName = Boolean(allocation.vehicleUnderInvestorName || false);
+
             return {
                 investorId: investor._id,
                 ownershipPercentage,
                 amount,
                 profitPercentage,
+                vehicleUnderInvestorName,
                 name: investor.name,
                 email: investor.email
             };
         });
+
+        // Validate that only one investor has vehicleUnderInvestorName set to true
+        const investorsWithVehicleName = normalizedAllocations.filter(a => a.vehicleUnderInvestorName === true);
+        if (investorsWithVehicleName.length > 1) {
+            return res.status(400).json({
+                success: false,
+                message: 'Only one investor can have the vehicle registered under their name'
+            });
+        }
 
         if (totalOwnershipPercentage > 100.0001) {
             return res.status(400).json({
@@ -3368,12 +3382,13 @@ exports.assignInvestorToLead = async (req, res, next) => {
             });
         }
 
-        lead.investorAllocations = normalizedAllocations.map(({ investorId, ownershipPercentage, amount, profitPercentage }) => ({
+        lead.investorAllocations = normalizedAllocations.map(({ investorId, ownershipPercentage, amount, profitPercentage, vehicleUnderInvestorName }) => ({
             investorId,
             percentage: ownershipPercentage, // Keep for backward compatibility
             ownershipPercentage,
             amount,
-            profitPercentage
+            profitPercentage,
+            vehicleUnderInvestorName: vehicleUnderInvestorName || false
         }));
         await lead.save();
 
@@ -3382,11 +3397,12 @@ exports.assignInvestorToLead = async (req, res, next) => {
             const purchaseOrder = await PurchaseOrder.findById(lead.purchaseOrder);
             if (purchaseOrder) {
                 purchaseOrder.investorId = normalizedAllocations[0]?.investorId || null;
-                purchaseOrder.investorAllocations = normalizedAllocations.map(({ investorId, ownershipPercentage, amount, profitPercentage }) => ({
+                purchaseOrder.investorAllocations = normalizedAllocations.map(({ investorId, ownershipPercentage, amount, profitPercentage, vehicleUnderInvestorName }) => ({
                     investorId,
                     ownershipPercentage,
                     amount,
-                    profitPercentage: profitPercentage || undefined
+                    profitPercentage: profitPercentage || undefined,
+                    vehicleUnderInvestorName: vehicleUnderInvestorName || false
                 }));
                 purchaseOrder.amount = finalPrice; // Update PO amount to final price
                 await purchaseOrder.save();
@@ -3590,11 +3606,12 @@ exports.approveLead = async (req, res, next) => {
                         investorId: normalizedAllocations[0].investorId || null,
                         amount: finalPrice || lead.priceAnalysis.purchasedFinalPrice || lead.priceAnalysis.maxSellingPrice,
                         total_investment: finalPrice || lead.priceAnalysis.purchasedFinalPrice || lead.priceAnalysis.maxSellingPrice,
-                        investorAllocations: normalizedAllocations.map(({ investorId, ownershipPercentage, percentage, amount, profitPercentage }) => ({
+                        investorAllocations: normalizedAllocations.map(({ investorId, ownershipPercentage, percentage, amount, profitPercentage, vehicleUnderInvestorName }) => ({
                             investorId,
                             amount,
                             ownershipPercentage: ownershipPercentage || percentage,
-                            profitPercentage: profitPercentage || undefined
+                            profitPercentage: profitPercentage || undefined,
+                            vehicleUnderInvestorName: vehicleUnderInvestorName || false
                         })),
                         prepared_by: preparedByName,
                         status: 'draft',
@@ -3609,11 +3626,12 @@ exports.approveLead = async (req, res, next) => {
                     if (preparedByName && !purchaseOrder.prepared_by) {
                         purchaseOrder.prepared_by = preparedByName;
                     }
-                    purchaseOrder.investorAllocations = normalizedAllocations.map(({ investorId, ownershipPercentage, percentage, amount, profitPercentage }) => ({
+                    purchaseOrder.investorAllocations = normalizedAllocations.map(({ investorId, ownershipPercentage, percentage, amount, profitPercentage, vehicleUnderInvestorName }) => ({
                         investorId,
                         amount,
                         ownershipPercentage: ownershipPercentage || percentage,
-                        profitPercentage: profitPercentage || undefined
+                        profitPercentage: profitPercentage || undefined,
+                        vehicleUnderInvestorName: vehicleUnderInvestorName || false
                     }));
                     await purchaseOrder.save();
                 }

@@ -251,6 +251,10 @@ class ZohoSignService {
         }
 
         const fieldTextData = this.buildLeadAgreementFieldData(leadData);
+        const { allocation } = leadData;
+
+        // Explicitly convert to boolean for vehicle registration
+        const vehicleUnderInvestorName = Boolean(allocation?.vehicleUnderInvestorName);
 
         // Build car name from make and model
         const carName = vehicleInfo?.make && vehicleInfo?.model
@@ -267,7 +271,10 @@ class ZohoSignService {
                 request_name: requestName,
                 field_data: {
                     field_text_data: fieldTextData,
-                    field_boolean_data: {},
+                    field_boolean_data: {
+                        vehicle_in_investor_name: vehicleUnderInvestorName,
+                        vehicle_under_company_name: !vehicleUnderInvestorName
+                    },
                     field_date_data: {},
                     field_radio_data: {},
                     field_checkboxgroup_data: {}
@@ -534,6 +541,7 @@ class ZohoSignService {
 
         const investmentAmount = allocation?.amount || 0;
         const investmentPercentage = allocation?.ownershipPercentage || allocation?.percentage || 0;
+        const profitPercentage = allocation?.profitPercentage || 0;
 
         return {
             purchase_order_no: fmt(purchaseOrder?.poId),
@@ -557,7 +565,8 @@ class ZohoSignService {
             inspection_cost: fmtNumber(inspectionCost),
             total_car_price: fmtNumber(totalCarPrice),
             investment_amount: fmtNumber(investmentAmount),
-            investment_percentage: fmtPercentage(investmentPercentage)
+            investment_percentage: fmtPercentage(investmentPercentage),
+            profit_percentage: fmtPercentage(profitPercentage)
         };
     }
 

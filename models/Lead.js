@@ -164,6 +164,10 @@ const leadSchema = new mongoose.Schema({
             type: Number,
             min: 0,
             max: 100
+        },
+        vehicleUnderInvestorName: {
+            type: Boolean,
+            default: false
         }
     }],
     // Simple dual approval tracking (1 from each admin group)

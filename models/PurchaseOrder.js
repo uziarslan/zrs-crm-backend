@@ -38,6 +38,10 @@ const purchaseOrderSchema = new mongoose.Schema({
             min: 0,
             max: 100
         },
+        vehicleUnderInvestorName: {
+            type: Boolean,
+            default: false
+        },
         docuSignEnvelopeId: String,
         docuSignStatus: {
             type: String,
