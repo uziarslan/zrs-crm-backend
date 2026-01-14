@@ -247,6 +247,7 @@ router.post(
         upload.fields([
             { name: 'inspectionReport', maxCount: 20 },
             { name: 'registrationCard', maxCount: 1 },
+            { name: 'registrationCardNew', maxCount: 1 },
             { name: 'carPictures', maxCount: 20 },
             { name: 'onlineHistoryCheck', maxCount: 20 },
             { name: 'consignmentAgreement', maxCount: 20 },

@@ -137,17 +137,66 @@ exports.createLead = async (req, res, next) => {
             return priority.toLowerCase().trim();
         };
 
-        const leadData = {
-            ...req.body,
-            type: 'purchase',
-            source: normalizeSource(req.body.source),
-            priority: normalizePriority(req.body.priority),
-            assignedTo: req.body.assignedTo || (req.userRole === 'manager' ? req.userId : null),
-            createdBy: req.userId,
-            createdByModel: req.userRole === 'admin' ? 'Admin' : 'Manager'
-        };
+        // Generate unique leadId upfront to avoid race conditions (same logic as bulk create)
+        // Find the maximum leadId number to ensure no duplicates
+        const prefix = 'PL';
+        const purchaseLeads = await Lead.find(
+            { type: 'purchase', leadId: { $regex: `^${prefix}\\d+$` } },
+            { leadId: 1 }
+        ).lean();
 
-        const lead = await Lead.create(leadData);
+        let maxId = 0;
+        purchaseLeads.forEach(lead => {
+            if (lead.leadId) {
+                const match = lead.leadId.match(/\d+/);
+                if (match) {
+                    const num = parseInt(match[0]);
+                    if (num > maxId) {
+                        maxId = num;
+                    }
+                }
+            }
+        });
+
+        let nextId = maxId + 1;
+        let lead = null;
+        let created = false;
+        let attempts = 0;
+
+        // Retry logic to handle potential race conditions
+        while (!created && attempts < 10) {
+            const leadId = `${prefix}${String(nextId).padStart(4, '0')}`;
+            nextId++;
+            attempts++;
+
+            const leadPayload = {
+                ...req.body,
+                leadId, // Assign leadId before creation to skip pre-save hook generation
+                type: 'purchase',
+                source: normalizeSource(req.body.source),
+                priority: normalizePriority(req.body.priority),
+                assignedTo: req.body.assignedTo || (req.userRole === 'manager' ? req.userId : null),
+                createdBy: req.userId,
+                createdByModel: req.userRole === 'admin' ? 'Admin' : 'Manager'
+            };
+
+            try {
+                lead = await Lead.create(leadPayload);
+                created = true;
+            } catch (createError) {
+                // If it's a duplicate key error, try next ID
+                if (createError.code === 11000 && createError.keyPattern?.leadId) {
+                    logger.warn(`Duplicate leadId ${leadId} detected, trying next ID`);
+                    continue;
+                }
+                // For other errors, throw immediately
+                throw createError;
+            }
+        }
+
+        if (!created) {
+            throw new Error(`Failed to create lead after ${attempts} attempts due to duplicate leadId conflicts`);
+        }
 
         // Auto-generate follow-ups if status is under_review
         if (lead.status === 'under_review') {
@@ -1720,7 +1769,7 @@ exports.uploadDocuments = async (req, res, next) => {
         const uploadedDocs = [];
 
         // Handle single file categories
-        ['registrationCard', 'sellOrder', 'sellInvoice'].forEach(category => {
+        ['registrationCard', 'registrationCardNew', 'sellOrder', 'sellInvoice'].forEach(category => {
             if (req.files[category] && req.files[category][0]) {
                 const file = req.files[category][0];
                 uploadedDocs.push({
@@ -2234,11 +2283,11 @@ exports.updateLead = async (req, res, next) => {
                 });
             }
 
-            // Managers can only edit leads with status 'new'
-            if (lead.status !== 'new') {
+            // Managers can only edit leads with status 'new' or 'cancelled'
+            if (lead.status !== 'new' && lead.status !== 'cancelled') {
                 return res.status(403).json({
                     success: false,
-                    message: 'You can only edit leads with status "new". Use status update for other changes.'
+                    message: 'You can only edit leads with status "new" or "cancelled". Use status update for other changes.'
                 });
             }
         }
