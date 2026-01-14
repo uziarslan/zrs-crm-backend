@@ -39,6 +39,32 @@ exports.getDashboard = async (req, res, next) => {
         let totalProfit = 0;
         let totalZrsProfit = 0;
 
+        // Initialize monthly and yearly data structures
+        const monthlyData = {};
+        const yearlyData = {};
+        const currentYear = new Date().getFullYear();
+        const currentMonth = new Date().getMonth();
+        const lastMonth = currentMonth === 0 ? 11 : currentMonth - 1;
+        const lastMonthYear = currentMonth === 0 ? currentYear - 1 : currentYear;
+
+        // Initialize last 12 months
+        for (let i = 11; i >= 0; i--) {
+            const date = new Date();
+            date.setMonth(date.getMonth() - i);
+            const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+            monthlyData[monthKey] = { revenue: 0, profit: 0, zrsProfit: 0, sales: 0 };
+        }
+
+        // Initialize last 5 years
+        for (let i = 4; i >= 0; i--) {
+            const year = currentYear - i;
+            yearlyData[year] = { revenue: 0, profit: 0, zrsProfit: 0, sales: 0 };
+        }
+
+        let lastMonthRevenue = 0;
+        let lastMonthProfit = 0;
+        let lastMonthZrsProfit = 0;
+
         if (sellInvoiceCount > 0) {
             const invoices = await SellInvoice.find({}).populate('lead');
 
@@ -101,6 +127,33 @@ exports.getDashboard = async (req, res, next) => {
                 }
 
                 totalZrsProfit += zrsProfit;
+
+                // Group by month and year
+                const invoiceDate = invoice.createdAt || new Date();
+                const invoiceYear = invoiceDate.getFullYear();
+                const invoiceMonth = invoiceDate.getMonth() + 1;
+                const monthKey = `${invoiceYear}-${String(invoiceMonth).padStart(2, '0')}`;
+
+                if (monthlyData[monthKey]) {
+                    monthlyData[monthKey].revenue += sellingPrice;
+                    monthlyData[monthKey].profit += calculatedTotalProfit;
+                    monthlyData[monthKey].zrsProfit += zrsProfit;
+                    monthlyData[monthKey].sales += 1;
+                }
+
+                if (yearlyData[invoiceYear]) {
+                    yearlyData[invoiceYear].revenue += sellingPrice;
+                    yearlyData[invoiceYear].profit += calculatedTotalProfit;
+                    yearlyData[invoiceYear].zrsProfit += zrsProfit;
+                    yearlyData[invoiceYear].sales += 1;
+                }
+
+                // Check if this is last month's data
+                if (invoiceDate.getMonth() === lastMonth && invoiceDate.getFullYear() === lastMonthYear) {
+                    lastMonthRevenue += sellingPrice;
+                    lastMonthProfit += calculatedTotalProfit;
+                    lastMonthZrsProfit += zrsProfit;
+                }
             }
         } else {
             // Legacy fallback: use Sale model
@@ -206,7 +259,20 @@ exports.getDashboard = async (req, res, next) => {
                     totalSales,
                     totalRevenue,
                     totalProfit,
-                    totalZrsProfit
+                    totalZrsProfit,
+                    lastMonth: {
+                        revenue: lastMonthRevenue,
+                        profit: lastMonthProfit,
+                        zrsProfit: lastMonthZrsProfit
+                    },
+                    monthly: Object.keys(monthlyData).map(key => ({
+                        month: key,
+                        ...monthlyData[key]
+                    })),
+                    yearly: Object.keys(yearlyData).map(year => ({
+                        year: parseInt(year),
+                        ...yearlyData[year]
+                    }))
                 },
                 approvals: {
                     pendingPOApprovals,
